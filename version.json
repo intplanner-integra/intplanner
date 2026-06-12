@@ -1,0 +1,13 @@
+{
+  "version": "5.1.0",
+  "mensaje": "Nueva versión 5.1.0 disponible — Auto-Backup reactivo y Verificador de versión.",
+  "fecha": "2026-06-12",
+  "changelog": {
+    "Auto-Backup": "Indicador sincronizado en tiempo real sin recargar",
+    "PDF Visita Cliente": "Exportación con logo, flujo completo e historial",
+    "Verificador de Versión": "Notificaciones automáticas de updates vía GitHub Pages",
+    "Fixes": "Suscripción a eventos en Config, historial reactivo"
+  },
+  "url_descarga": "https://intplanner-integra.github.io/intplanner/",
+  "url_release": "https://github.com/intplanner-integra/intplanner/releases/tag/v5.1.0"
+}
