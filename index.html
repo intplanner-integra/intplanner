@@ -13895,7 +13895,7 @@ const App = () => {
   const [alertas,setAlertas]=useState(()=>DB.get('alertas'));
   const [servicios,setServicios]=useState(()=>DB.get('servicios'));
   const [cargos,setCargos]=useState(()=>DB.get('cargos'));
-  const backup=!!JSON.parse(localStorage.getItem('ip_backup')||'null');
+  const [backup,setBackup]=useState(()=>JSON.parse(localStorage.getItem('ip_backup')||'null'));
 
   const toast = useCallback((msg,type='info')=>{
     const id=uid();
@@ -13914,8 +13914,13 @@ const App = () => {
   // Escuchar cambios de configuración (logo, empresa) para actualizar Sidebar en tiempo real
   useEffect(()=>{
     const onCfg = () => setCfgApp(JSON.parse(localStorage.getItem('ip_config')||'{}'));
+    const onBackup = (e) => setBackup(e.detail);
     window.addEventListener('ip-config-updated', onCfg);
-    return ()=>window.removeEventListener('ip-config-updated', onCfg);
+    window.addEventListener('ip-backup-updated', onBackup);
+    return ()=>{
+      window.removeEventListener('ip-config-updated', onCfg);
+      window.removeEventListener('ip-backup-updated', onBackup);
+    };
   },[]);
 
   // B7: Referencia del timer de inactividad
