@@ -14440,35 +14440,50 @@ const AutoBackup = {
   },
 
   run: () => {
+    // FIX-ROOT-BACKUP: El indicador se actualiza PRIMERO e incondicionalmente.
+    // El snapshot grande (ip_autobackup, ~890KB) se escribe en bloque separado
+    // con su propio try/catch para que un fallo de quota NO interrumpa el indicador.
+    AutoBackup._version++;
+
+    const ts  = new Date().toISOString();
+    const ver = AutoBackup._version;
+
+    // ── PASO 1: Indicador y versión — SIEMPRE, ANTES que el snapshot ──────────
+    try { localStorage.setItem('ip_backup_ver', ver); } catch(_){}
+    const info = {ts, auto: true, version: ver, storage: false};
+    try { localStorage.setItem('ip_backup', JSON.stringify(info)); } catch(_){}
+    window.dispatchEvent(new CustomEvent('ip-backup-updated', {detail: info}));
+
+    // ── PASO 2: Construir snapshot ─────────────────────────────────────────────
+    const snapshot = { ts, version: ver, auto: true, cols: {} };
     try {
-      AutoBackup._version++;
-      localStorage.setItem('ip_backup_ver', AutoBackup._version);
-      const snapshot = { ts: new Date().toISOString(), version: AutoBackup._version, auto: true, cols: {} };
       COLS_BACKUP.forEach(c => { snapshot.cols[c] = JSON.parse(localStorage.getItem('ip_'+c)||'[]'); });
       snapshot.cfg        = JSON.parse(localStorage.getItem('ip_config')||'{}');
       snapshot.apariencia = JSON.parse(localStorage.getItem('ip_apariencia')||'{}');
       snapshot.usuarios   = JSON.parse(localStorage.getItem('ip_usuarios')||'[]');
+    } catch(_){}
 
-      // 1. Guardar snapshot completo en localStorage (siempre, inmediato)
+    // ── PASO 3: Snapshot completo — aislado, fallo de quota no rompe indicador ─
+    try {
+      // Liberar espacio antes de escribir si ya hay un snapshot previo
+      try { localStorage.removeItem('ip_autobackup'); } catch(_){}
       localStorage.setItem('ip_autobackup', JSON.stringify(snapshot));
+    } catch(e) {
+      console.warn('Auto-backup: snapshot local omitido por quota llena.', e.message);
+    }
 
-      // 2. Historial local — últimas 10 entradas
+    // ── PASO 4: Historial local — últimas 10 entradas ─────────────────────────
+    try {
       const hist = JSON.parse(localStorage.getItem('ip_autobackup_hist')||'[]');
-      hist.unshift({ts: snapshot.ts, version: AutoBackup._version, storage: false});
+      hist.unshift({ts, version: ver, storage: false});
       localStorage.setItem('ip_autobackup_hist', JSON.stringify(hist.slice(0,10)));
+    } catch(_){}
 
-      // 3. Actualizar indicador de backup en Header
-      const info = {ts: snapshot.ts, auto: true, version: AutoBackup._version, storage: false};
-      localStorage.setItem('ip_backup', JSON.stringify(info));
-      window.dispatchEvent(new CustomEvent('ip-backup-updated', {detail: info}));
+    const total = COLS_BACKUP.reduce((a,c)=>(snapshot.cols[c]?.length||0)+a, 0);
+    console.log(`💾 Auto-backup v${ver} — ${total} registros — indicador: Automático`);
 
-      const total = COLS_BACKUP.reduce((a,c)=>(snapshot.cols[c]?.length||0)+a, 0);
-      console.log(`💾 Auto-backup local v${AutoBackup._version} — ${total} registros`);
-
-      // 4. Subir a Firebase Storage en segundo plano (no bloquea UI)
-      AutoBackup._uploadStorage(snapshot);
-
-    } catch(e) { console.warn('Auto-backup error:', e.message); }
+    // ── PASO 5: Subir a Firebase Storage en segundo plano ─────────────────────
+    AutoBackup._uploadStorage(snapshot);
   },
 
   // Sube el snapshot a Firebase Storage como JSON
