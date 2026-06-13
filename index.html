@@ -752,14 +752,16 @@ try {
   // El SDK compat 10.7.1 acepta databaseId via settings() ANTES de la primera
   // operación. Si el proyecto usa la BD por defecto, no se necesita configuración.
   try {
-    // Usar la API oficial settings() — solo si el método existe y no hay ops pendientes
+    // ROOT-FIX: Usar la base de datos Firestore por defecto del proyecto.
+    // 'intplannerbd' no existe en este proyecto — causaba que todos los
+    // perfiles de usuario y colecciones fueran a una BD inexistente,
+    // impidiendo que los usuarios registrados pudieran iniciar sesión.
     if(typeof _db.settings === 'function') {
-      _db.settings({ databaseId: 'intplannerbd', ignoreUndefinedProperties: true });
-      console.log('✅ Firestore configurado: intplannerbd (via settings)');
+      _db.settings({ ignoreUndefinedProperties: true });
+      console.log('✅ Firestore configurado: base de datos por defecto');
     }
   } catch(e2) {
-    // settings() falla si ya hay operaciones activas — continuar con BD default
-    console.warn('ℹ️ Firestore settings no aplicado (operaciones activas):', e2.message);
+    console.warn('ℹ️ Firestore settings no aplicado:', e2.message);
   }
   _auth  = firebase.auth();
   // CORRECCIÓN B: Persistencia offline con flag global que indica cuando está lista.
