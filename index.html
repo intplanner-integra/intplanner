@@ -2180,7 +2180,15 @@ const BusquedaGlobal = ({tareas,clientes,equipo,proyectos,facturas,onNav}) => {
 const Header = ({title,user,onLogout,backup,onMobOpen}) => {
   const [online,     setOnline]    = React.useState(navigator.onLine);
   const [queueN,     setQueueN]    = React.useState(0);
-  const [lastBackup, setLastBackup]= React.useState(()=>window.AutoBackup?.last()||backup);
+  // ROOT-FIX-B1: Leer ip_backup directamente desde localStorage como fuente primaria.
+  // El evento ip-backup-updated puede dispararse ANTES de que React monte (Babel es async ~1s).
+  // La lectura directa desde localStorage garantiza el estado correcto siempre al montar.
+  const [lastBackup, setLastBackup]= React.useState(()=>{
+    try {
+      const stored = JSON.parse(localStorage.getItem('ip_backup')||'null');
+      return stored || window.AutoBackup?.last() || backup || null;
+    } catch(_){ return backup || null; }
+  });
   const [pushOn,     setPushOn]    = React.useState(()=>typeof Notification!=='undefined'&&Notification.permission==='granted'&&window.PushSvc?.getCfg()?.enabled!==false);
 
   React.useEffect(()=>{
@@ -2189,13 +2197,27 @@ const Header = ({title,user,onLogout,backup,onMobOpen}) => {
       setQueueN(window.OfflineQueue?.count()||0);
       setPushOn(typeof Notification!=='undefined'&&Notification.permission==='granted'&&window.PushSvc?.getCfg()?.enabled!==false);
     };
-    const onBackup = (e) => setLastBackup(e.detail);
-    const onPush   = ()  => setPushOn(true);
+    const onBackup = (e) => {
+      // Siempre leer desde localStorage para garantizar consistencia
+      try {
+        const stored = e.detail || JSON.parse(localStorage.getItem('ip_backup')||'null');
+        setLastBackup(stored);
+      } catch(_){}
+    };
+    const onPush = () => setPushOn(true);
     window.addEventListener('online',  upd);
     window.addEventListener('offline', upd);
     window.addEventListener('ip-backup-updated', onBackup);
     window.addEventListener('ip-push-ready',     onPush);
     const t = setInterval(upd, 5000);
+    // ROOT-FIX-B1-REFUERZO: Re-leer ip_backup al montar por si el evento
+    // ya se disparó antes de que este useEffect se registrara
+    setTimeout(()=>{
+      try {
+        const stored = JSON.parse(localStorage.getItem('ip_backup')||'null');
+        if(stored) setLastBackup(stored);
+      } catch(_){}
+    }, 200);
     return ()=>{
       window.removeEventListener('online',  upd);
       window.removeEventListener('offline', upd);
@@ -12847,7 +12869,8 @@ const Config = () => {
       if(data.usuarios)   localStorage.setItem('ip_usuarios',   JSON.stringify(data.usuarios));
 
       // ── Actualizar marca de backup ──
-      const info = {ts: new Date().toISOString(), restoredFrom: file.name, total};
+      // ROOT-FIX-B2: incluir auto:true para que el indicador del Header muestre "Backup auto"
+      const info = {ts: new Date().toISOString(), auto: true, restoredFrom: file.name, total};
       setBackup(info);
       localStorage.setItem('ip_backup', JSON.stringify(info));
 
