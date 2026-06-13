@@ -15037,6 +15037,16 @@ window.addEventListener('load', () => {
       // Ejecutar backup inmediato al iniciar si hay datos (garantiza que ip_autobackup esté al día)
       window.AutoBackup.run();
     }
+    
+    // FIX-BACKUP-RELOAD: Asegurar que el estado de backup se inicializa correctamente al recargar
+    // Si hay backup previo guardado, disparar evento para que Header y Config se actualicen
+    try {
+      const backup = JSON.parse(localStorage.getItem('ip_backup')||'null');
+      if(backup) {
+        window.dispatchEvent(new CustomEvent('ip-backup-updated', {detail: backup}));
+        console.log('✓ Estado de backup restaurado:', backup.auto ? 'Automático' : 'Manual');
+      }
+    } catch(_){}
   }, 1000);
 });
 </script>
