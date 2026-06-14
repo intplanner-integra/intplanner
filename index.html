@@ -2190,6 +2190,7 @@ const Header = ({title,user,onLogout,backup,onMobOpen}) => {
   const [online,     setOnline]    = React.useState(navigator.onLine);
   const [queueN,     setQueueN]    = React.useState(0);
   const [chatUnread, setChatUnread] = React.useState(0);  // FASE 3: Chat badge
+  const [presencia, setPresencia] = React.useState({online:0, users:[]});  // NEW: Indicador presencia
   // ROOT-FIX-B1: Leer ip_backup directamente desde localStorage como fuente primaria.
   // El evento ip-backup-updated puede dispararse ANTES de que React monte (Babel es async ~1s).
   // La lectura directa desde localStorage garantiza el estado correcto siempre al montar.
@@ -2218,12 +2219,22 @@ const Header = ({title,user,onLogout,backup,onMobOpen}) => {
     const onChatBadge = (e) => {
       setChatUnread(e.detail || 0);
     };
+    // NEW: Escuchar cambios de presencia (usuarios online)
+    const onPresenciaChange = (e) => {
+      setPresencia(e.detail || {online:0, users:[]});
+    };
+    // NEW: Leer presencia inicial desde localStorage
+    try {
+      const storedPresencia = JSON.parse(localStorage.getItem('ip_chat_presencia')||'{"online":0,"users":[]}');
+      setPresencia(storedPresencia);
+    } catch(_){}
     const onPush = () => setPushOn(true);
     window.addEventListener('online',  upd);
     window.addEventListener('offline', upd);
     window.addEventListener('ip-backup-updated', onBackup);
     window.addEventListener('ip-push-ready',     onPush);
     window.addEventListener('chat-unread-badge', onChatBadge);
+    window.addEventListener('chat-presencia-updated', onPresenciaChange);  // NEW
     const t = setInterval(upd, 5000);
     // ROOT-FIX-B1-REFUERZO: Re-leer ip_backup al montar por si el evento
     // ya se disparó antes de que este useEffect se registrara
@@ -2239,6 +2250,7 @@ const Header = ({title,user,onLogout,backup,onMobOpen}) => {
       window.removeEventListener('ip-backup-updated', onBackup);
       window.removeEventListener('ip-push-ready',     onPush);
       window.removeEventListener('chat-unread-badge', onChatBadge);
+      window.removeEventListener('chat-presencia-updated', onPresenciaChange);  // NEW
       clearInterval(t);
     };
   },[]);
@@ -2287,6 +2299,14 @@ const Header = ({title,user,onLogout,backup,onMobOpen}) => {
         style={{display:'flex',alignItems:'center',gap:5,fontSize:11,fontWeight:600,padding:'4px 10px',borderRadius:20,border:'1px solid',
           borderColor:pushOn?'rgba(201,168,76,.3)':'#243447',background:pushOn?'rgba(201,168,76,.08)':'transparent',color:pushOn?'#C9A84C':'#475569'}}>
         <span style={{fontSize:13}}>{pushOn?'🔔':'🔕'}</span>
+      </div>
+      
+      {/* NEW: Indicador de usuarios conectados (Global, de todos los módulos) */}
+      <div className="mob-hide" title={`${presencia.online} usuario${presencia.online!==1?'s':''} en línea`}
+        style={{display:'flex',alignItems:'center',gap:6,fontSize:11,fontWeight:600,padding:'4px 10px',borderRadius:20,
+          border:'1px solid rgba(74,222,128,.25)',background:'rgba(74,222,128,.08)',color:'#4ade80'}}>
+        <span style={{width:6,height:6,borderRadius:'50%',background:'#4ade80',display:'inline-block',animation:'pulse 1.6s infinite'}}/>
+        {presencia.online} en línea
       </div>
       {/* Indicador auto-backup */}
       <div className="mob-hide" title={lastBackup?`Último backup: ${new Date(lastBackup.ts).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})}`:''} style={{display:'flex',alignItems:'center',gap:6,fontSize:11,fontWeight:600,padding:'4px 12px',borderRadius:20,border:'1px solid',borderColor:lastBackup?'rgba(74,222,128,.25)':'#243447',background:lastBackup?'rgba(26,107,58,.15)':'transparent',color:lastBackup?'#4ade80':'#475569'}}>
@@ -8124,54 +8144,19 @@ const Chat = () => {
   // Scroll al último mensaje
   useEffect(()=>{ endRef.current?.scrollIntoView({behavior:'smooth'}); },[msgs]);
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // FASE 2-3: NOTIFICACIONES EN TIEMPO REAL + MENSAJES NO LEÍDOS
-  // ═══════════════════════════════════════════════════════════════════════════
+  // NEW: Disparar evento global de presencia para Header y otros módulos
   useEffect(()=>{
-    if(!user?.id) return;
+    // Guardar en localStorage para que esté disponible en todos los módulos
+    localStorage.setItem('ip_chat_presencia', JSON.stringify(presencia));
     
-    // Escuchar cambios en mensajes no leídos (FASE 3)
-    const unsubUnread = ChatSvc.onUnreadChange(user.id, (count) => {
-      setUnreadCount(count);
-      // Disparar evento para que Header muestre badge
-      window.dispatchEvent(new CustomEvent('chat-unread-badge', {detail: count}));
-      window.lastChatUnreadCount = count; // Global para Header
-      console.log('💬 Mensajes no leídos:', count);
-    });
-    
-    // Escuchar nuevos mensajes (FASE 2)
-    const handleNewMsg = (e) => {
-      const {msgs: newMsgs} = e.detail;
-      
-      // Si algún mensaje no es mío → notificar
-      newMsgs.forEach(m => {
-        if(m.autorId !== user?.id) {
-          console.log('💬 Nuevo mensaje de:', m.autorNombre);
-          
-          // Notificación visual
-          NotificationSvc.show('💬 Nuevo mensaje', {
-            message: `${m.autorNombre}: ${m.texto.substring(0,60)}${m.texto.length > 60 ? '...' : ''}`,
-            type: 'info',
-            duration: 5000
-          });
-          
-          // Sonido
-          NotificationSvc.playSound();
-          
-          // Marcar como no leído
-          ChatSvc.markAsRead(m.id || m._key, user.id);
-        }
-      });
-    };
-    
-    window.addEventListener('ip-chat-new-messages', handleNewMsg);
-    
-    return ()=>{
-      unsubUnread?.();
-      window.removeEventListener('ip-chat-new-messages', handleNewMsg);
-    };
-  },[user?.id]);
-  
+    // Disparar evento global
+    window.dispatchEvent(new CustomEvent('chat-presencia-updated', {
+      detail: presencia
+    }));
+    console.log('👥 Presencia actualizada (global):', presencia.online, 'usuarios');
+  },[presencia]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // Marcar todos como leídos cuando el módulo Chat se abre
   useEffect(()=>{
     ChatSvc.markAllAsRead(user?.id);
@@ -14277,15 +14262,49 @@ const App = () => {
     const onCfg = () => setCfgApp(JSON.parse(localStorage.getItem('ip_config')||'{}'));
     const onBackup = (e) => setBackup(e.detail);
     const onChatBadge = (e) => setChatUnread(e.detail || 0);  // FASE 3: Escuchar badge de Chat
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FIX CRÍTICO: Notificaciones GLOBALES (activas en TODOS los módulos)
+    // PROBLEMA ORIGINAL: listener en Chat component → solo funciona si Chat está abierto
+    // SOLUCIÓN: Listener en App component (SIEMPRE activo, independiente del módulo actual)
+    // ═══════════════════════════════════════════════════════════════════════════
+    const handleNewMsg = (e) => {
+      const {msgs: newMsgs} = e.detail;
+      if(!user?.id) return;
+      
+      // Notificar para CADA mensaje nuevo que no sea mío
+      newMsgs.forEach(m => {
+        if(m.autorId !== user?.id) {
+          console.log('🔔 NOTIFICACIÓN GLOBAL ACTIVA:', m.autorNombre, '→', m.texto.substring(0,40));
+          
+          // 1. Toast visual (en cualquier módulo)
+          NotificationSvc.show('💬 Nuevo mensaje', {
+            message: `${m.autorNombre}: ${m.texto.substring(0,60)}${m.texto.length > 60 ? '...' : ''}`,
+            type: 'info',
+            duration: 5000
+          });
+          
+          // 2. Sonido (en cualquier módulo)
+          NotificationSvc.playSound();
+          
+          // 3. Marcar como no leído
+          ChatSvc.markAsRead(m.id || m._key, user.id);
+        }
+      });
+    };
+    
     window.addEventListener('ip-config-updated', onCfg);
     window.addEventListener('ip-backup-updated', onBackup);
-    window.addEventListener('chat-unread-badge', onChatBadge);  // FASE 3
+    window.addEventListener('chat-unread-badge', onChatBadge);
+    window.addEventListener('ip-chat-new-messages', handleNewMsg);  // ← FIX: GLOBAL listener
+    
     return ()=>{
       window.removeEventListener('ip-config-updated', onCfg);
       window.removeEventListener('ip-backup-updated', onBackup);
-      window.removeEventListener('chat-unread-badge', onChatBadge);  // FASE 3
+      window.removeEventListener('chat-unread-badge', onChatBadge);
+      window.removeEventListener('ip-chat-new-messages', handleNewMsg);  // ← FIX: cleanup
     };
-  },[]);
+  },[user?.id]);
 
   // B7: Referencia del timer de inactividad
   const inactivityRef = useRef(null);
