@@ -2020,7 +2020,7 @@ const MENU = [
   {id:'config',label:'Configuración',ico:'cog'},
 ];
 
-const Sidebar = ({active,onNav,col,onToggle,user,cfg,permisos,mobOpen,onMobClose}) => {
+const Sidebar = ({active,onNav,col,onToggle,user,cfg,permisos,mobOpen,onMobClose,chatUnread}) => {
   // V20-FIX: La normalización del rol ocurre en AuthSvc.session() — aquí solo confiamos en user.rol.
   // Defensa adicional: también consideramos admin si el email coincide con cfg.adminEmail.
   const esAdmin = user?.rol === 'administrador' ||
@@ -2048,9 +2048,16 @@ const Sidebar = ({active,onNav,col,onToggle,user,cfg,permisos,mobOpen,onMobClose
     </div>
     <nav style={{flex:1,minHeight:0,overflowY:'auto',overflowX:'hidden',padding:'8px',display:'flex',flexDirection:'column',gap:2}}>
       {menu.map(m=>(
-        <button key={m.id} className={clx('si',active===m.id&&'active')} onClick={()=>{onNav(m.id);onMobClose&&onMobClose();}} title={col?m.label:undefined}>
+        <button key={m.id} className={clx('si',active===m.id&&'active')} onClick={()=>{onNav(m.id);onMobClose&&onMobClose();}} title={col?m.label:undefined}
+          style={{position:'relative'}}>
           <Ico n={m.ico} s={17}/>
           <span className="si-label">{m.label}</span>
+          {/* FASE 3: Badge de Chat no leídos */}
+          {m.id === 'chat' && chatUnread > 0 && (
+            <div style={{position:'absolute',top:4,right:4,background:'#ef4444',color:'#fff',fontSize:9,fontWeight:700,width:18,height:18,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',border:'2px solid #0f1923'}}>
+              {chatUnread > 99 ? '99+' : chatUnread}
+            </div>
+          )}
         </button>
       ))}
     </nav>
@@ -2182,6 +2189,7 @@ const BusquedaGlobal = ({tareas,clientes,equipo,proyectos,facturas,onNav}) => {
 const Header = ({title,user,onLogout,backup,onMobOpen}) => {
   const [online,     setOnline]    = React.useState(navigator.onLine);
   const [queueN,     setQueueN]    = React.useState(0);
+  const [chatUnread, setChatUnread] = React.useState(0);  // FASE 3: Chat badge
   // ROOT-FIX-B1: Leer ip_backup directamente desde localStorage como fuente primaria.
   // El evento ip-backup-updated puede dispararse ANTES de que React monte (Babel es async ~1s).
   // La lectura directa desde localStorage garantiza el estado correcto siempre al montar.
@@ -2206,11 +2214,16 @@ const Header = ({title,user,onLogout,backup,onMobOpen}) => {
         setLastBackup(stored);
       } catch(_){}
     };
+    // FASE 3: Escuchar badge de Chat
+    const onChatBadge = (e) => {
+      setChatUnread(e.detail || 0);
+    };
     const onPush = () => setPushOn(true);
     window.addEventListener('online',  upd);
     window.addEventListener('offline', upd);
     window.addEventListener('ip-backup-updated', onBackup);
     window.addEventListener('ip-push-ready',     onPush);
+    window.addEventListener('chat-unread-badge', onChatBadge);
     const t = setInterval(upd, 5000);
     // ROOT-FIX-B1-REFUERZO: Re-leer ip_backup al montar por si el evento
     // ya se disparó antes de que este useEffect se registrara
@@ -2225,6 +2238,7 @@ const Header = ({title,user,onLogout,backup,onMobOpen}) => {
       window.removeEventListener('offline', upd);
       window.removeEventListener('ip-backup-updated', onBackup);
       window.removeEventListener('ip-push-ready',     onPush);
+      window.removeEventListener('chat-unread-badge', onChatBadge);
       clearInterval(t);
     };
   },[]);
@@ -7648,6 +7662,152 @@ const Alertas = () => {
 
 // ── CHAT INTERNO ─────────────────────────────────────────────
 // ── CHAT EN TIEMPO REAL ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// NOTIFICACIONES GLOBALES — Intervención Chat FASE 2
+// ══════════════════════════════════════════════════════════════════════════════
+const NotificationSvc = {
+  _audio: null,
+  _audioCtx: null,
+  
+  // Inicializar audio una sola vez
+  init: () => {
+    if(!NotificationSvc._audio) {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      try {
+        NotificationSvc._audioCtx = new AudioContext();
+      } catch(e) {
+        console.warn('⚠️ Audio Context no disponible:', e.message);
+      }
+    }
+  },
+  
+  // Notificación visual (toast)
+  show: (title, options = {}) => {
+    const {
+      message = '',
+      duration = 4000,
+      type = 'info',     // 'info', 'success', 'warning', 'error'
+      autoClose = true
+    } = options;
+    
+    const id = 'notif_' + Date.now();
+    const colors = {
+      info: '#4ade80',
+      success: '#10b981',
+      warning: '#f59e0b',
+      error: '#ef4444'
+    };
+    
+    const div = document.createElement('div');
+    div.id = id;
+    div.style.cssText = `
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: #0f1923;
+      border: 1px solid ${colors[type]};
+      border-radius: 8px;
+      padding: 12px 16px;
+      color: #fff;
+      font-size: 13px;
+      z-index: 9999;
+      box-shadow: 0 4px 12px rgba(0,0,0,.4);
+      animation: slideIn 0.3s ease;
+      max-width: 300px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    `;
+    div.innerHTML = `
+      <div style="display: flex; gap: 8px; align-items: flex-start;">
+        <div style="color: ${colors[type]}; font-weight: bold; font-size: 16px; line-height: 1;">•</div>
+        <div>
+          <div style="font-weight: 600; margin-bottom: 4px; line-height: 1.3;">${title}</div>
+          ${message ? `<div style="opacity: 0.8; font-size: 12px; line-height: 1.3;">${message.substring(0, 80)}</div>` : ''}
+        </div>
+      </div>
+    `;
+    
+    document.body.appendChild(div);
+    
+    // Agregar estilos de animación si no existen
+    if(!document.getElementById('notif-styles')) {
+      const style = document.createElement('style');
+      style.id = 'notif-styles';
+      style.textContent = `
+        @keyframes slideIn {
+          from { transform: translateX(400px); opacity: 0; }
+          to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes slideOut {
+          from { transform: translateX(0); opacity: 1; }
+          to { transform: translateX(400px); opacity: 0; }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+    
+    if(autoClose) {
+      setTimeout(() => {
+        div.style.animation = 'slideOut 0.3s ease';
+        setTimeout(() => div.remove(), 300);
+      }, duration);
+    }
+    
+    return id;
+  },
+  
+  // Sonido para nuevos mensajes
+  playSound: () => {
+    NotificationSvc.init();
+    
+    try {
+      // Crear sonido simple con Web Audio API
+      const ctx = NotificationSvc._audioCtx;
+      if(!ctx) {
+        console.warn('⚠️ Audio Context no disponible');
+        return;
+      }
+      
+      const t = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      
+      osc.frequency.value = 800; // Hz
+      gain.gain.setValueAtTime(0.2, t);
+      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+      
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      
+      osc.start(t);
+      osc.stop(t + 0.15);
+    } catch(e) {
+      console.warn('⚠️ Error generando sonido:', e.message);
+    }
+  },
+  
+  // Solicitar permisos de notificación
+  requestPermission: async () => {
+    if(!('Notification' in window)) {
+      console.warn('⚠️ Notifications no soportadas en este navegador');
+      return false;
+    }
+    
+    if(Notification.permission === 'granted') {
+      return true;
+    }
+    
+    if(Notification.permission !== 'denied') {
+      const perm = await Notification.requestPermission();
+      return perm === 'granted';
+    }
+    
+    return false;
+  }
+};
+
+window.NotificationSvc = NotificationSvc;
+
+// ══════════════════════════════════════════════════════════════════════════════
 const ChatSvc = {
   PATH_MSGS:    'chat/mensajes',
   PATH_TYPING:  'chat/escribiendo',
@@ -7658,13 +7818,36 @@ const ChatSvc = {
   onMessages: (cb) => {
     if(RTDB_OK) {
       const ref = _rtdb.ref(ChatSvc.PATH_MSGS).limitToLast(200);
+      let initialized = false;  // Para saber si es carga inicial
+      
       const handler = ref.on('value', snap => {
         const data = snap.val() || {};
         const msgs = Object.entries(data)
           .map(([k,v])=>({...v, _key:k}))
           .sort((a,b)=>a.ts-b.ts);
+        
         // Sincronizar con localStorage como caché
+        const oldMsgs = JSON.parse(localStorage.getItem('ip_chat')||'[]');
         localStorage.setItem('ip_chat', JSON.stringify(msgs));
+        
+        // FASE 2: NOTIFICACIONES — Detectar mensajes nuevos (después de inicialización)
+        if(initialized) {
+          const newMsgs = msgs.filter(m => 
+            !oldMsgs.find(om => (om.id || om._key) === (m.id || m._key))
+          );
+          
+          if(newMsgs.length > 0) {
+            // Crear evento para que Chat y otros módulos lo escuchen
+            window.dispatchEvent(new CustomEvent('ip-chat-new-messages', {
+              detail: { msgs: newMsgs, total: msgs.length }
+            }));
+            console.log('💬 Nuevos mensajes detectados:', newMsgs.length);
+          }
+        } else {
+          initialized = true; // Marcar que carga inicial completó
+          console.log('💬 Chat: carga inicial completada');
+        }
+        
         cb(msgs);
       });
       ChatSvc._listeners.push({ref, handler, event:'value'});
@@ -7674,7 +7857,30 @@ const ChatSvc = {
     const list = JSON.parse(localStorage.getItem('ip_chat')||'[]');
     cb(list);
     let tc = null;
-    const startC = () => { if(tc) return; tc = setInterval(()=>{ if(!document.hidden) cb(JSON.parse(localStorage.getItem('ip_chat')||'[]')); }, 5000); };
+    let lastList = list;
+    const startC = () => { 
+      if(tc) return; 
+      tc = setInterval(()=>{ 
+        if(!document.hidden) {
+          const newList = JSON.parse(localStorage.getItem('ip_chat')||'[]');
+          
+          // Detectar mensajes nuevos
+          const newMsgs = newList.filter(m => 
+            !lastList.find(om => (om.id || om._key) === (m.id || m._key))
+          );
+          
+          if(newMsgs.length > 0) {
+            window.dispatchEvent(new CustomEvent('ip-chat-new-messages', {
+              detail: { msgs: newMsgs, total: newList.length }
+            }));
+            console.log('💬 Nuevos mensajes (localStorage):', newMsgs.length);
+          }
+          
+          lastList = newList;
+          cb(newList);
+        }
+      }, 5000); 
+    };
     const stopC  = () => { if(tc){ clearInterval(tc); tc=null; } };
     const onVis  = () => document.hidden ? stopC() : startC();
     document.addEventListener('visibilitychange', onVis);
@@ -7797,6 +8003,81 @@ const ChatSvc = {
     const tickInterval = setInterval(compute, 15000);
     return () => { ref.off('value', handler); clearInterval(tickInterval); };
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FASE 3: MENSAJES NO LEÍDOS
+  // ═══════════════════════════════════════════════════════════════════════════
+  
+  // Marcar un mensaje específico como leído
+  markAsRead: (msgId, userId) => {
+    if(!userId || !msgId) return;
+    const key = `ip_chat_unread_${userId}`;
+    const unread = JSON.parse(localStorage.getItem(key) || '{"leidos":[]}');
+    if(!unread.leidos) unread.leidos = [];
+    if(!unread.leidos.includes(msgId)) {
+      unread.leidos.push(msgId);
+      localStorage.setItem(key, JSON.stringify(unread));
+      window.dispatchEvent(new CustomEvent('chat-unread-changed', {detail: unread}));
+    }
+  },
+  
+  // Marcar TODOS los mensajes como leídos
+  markAllAsRead: (userId) => {
+    if(!userId) return;
+    const key = `ip_chat_unread_${userId}`;
+    const msgs = JSON.parse(localStorage.getItem('ip_chat') || '[]');
+    const msgIds = msgs.map(m => m.id || m._key);
+    localStorage.setItem(key, JSON.stringify({leidos: msgIds}));
+    window.dispatchEvent(new CustomEvent('chat-unread-changed', {detail: {leidos: msgIds}}));
+  },
+  
+  // Obtener conteo de mensajes no leídos
+  getUnreadCount: (userId) => {
+    if(!userId) return 0;
+    const key = `ip_chat_unread_${userId}`;
+    const unread = JSON.parse(localStorage.getItem(key) || '{"leidos":[]}');
+    const msgs = JSON.parse(localStorage.getItem('ip_chat') || '[]');
+    
+    // No leídos = mensajes que no están en lista "leidos" EXCEPTO los míos propios
+    const myMsgs = new Set();
+    msgs.forEach(m => {
+      if(m.autorId === userId) myMsgs.add(m.id || m._key);
+    });
+    
+    const unreadCount = msgs.filter(m => {
+      const mid = m.id || m._key;
+      return !unread.leidos.includes(mid) && !myMsgs.has(mid);
+    }).length;
+    
+    return unreadCount;
+  },
+  
+  // Escuchar cambios en mensajes no leídos
+  onUnreadChange: (userId, cb) => {
+    if(!userId) return ()=>{};
+    
+    const key = `ip_chat_unread_${userId}`;
+    
+    const handler = (e) => {
+      const count = ChatSvc.getUnreadCount(userId);
+      cb(count);
+    };
+    
+    window.addEventListener('chat-unread-changed', handler);
+    window.addEventListener('ip-chat-updated', handler);
+    
+    // Llamar inmediatamente con valor actual
+    setTimeout(() => {
+      const count = ChatSvc.getUnreadCount(userId);
+      cb(count);
+    }, 100);
+    
+    return () => {
+      window.removeEventListener('chat-unread-changed', handler);
+      window.removeEventListener('ip-chat-updated', handler);
+    };
+  }
+
 };
 
 window.ChatSvc = ChatSvc;
@@ -7810,6 +8091,7 @@ const Chat = () => {
   const [showOnline, setShowOnline] = useState(false);
   const [delId,     setDelId]     = useState(null);
   const [rtdb,      setRtdb]      = useState(RTDB_OK);
+  const [unreadCount, setUnreadCount] = useState(0);  // FASE 3: Badge de no leídos
   const endRef    = useRef();
   const typingTimer = useRef(null);
 
@@ -7841,6 +8123,59 @@ const Chat = () => {
 
   // Scroll al último mensaje
   useEffect(()=>{ endRef.current?.scrollIntoView({behavior:'smooth'}); },[msgs]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FASE 2-3: NOTIFICACIONES EN TIEMPO REAL + MENSAJES NO LEÍDOS
+  // ═══════════════════════════════════════════════════════════════════════════
+  useEffect(()=>{
+    if(!user?.id) return;
+    
+    // Escuchar cambios en mensajes no leídos (FASE 3)
+    const unsubUnread = ChatSvc.onUnreadChange(user.id, (count) => {
+      setUnreadCount(count);
+      // Disparar evento para que Header muestre badge
+      window.dispatchEvent(new CustomEvent('chat-unread-badge', {detail: count}));
+      window.lastChatUnreadCount = count; // Global para Header
+      console.log('💬 Mensajes no leídos:', count);
+    });
+    
+    // Escuchar nuevos mensajes (FASE 2)
+    const handleNewMsg = (e) => {
+      const {msgs: newMsgs} = e.detail;
+      
+      // Si algún mensaje no es mío → notificar
+      newMsgs.forEach(m => {
+        if(m.autorId !== user?.id) {
+          console.log('💬 Nuevo mensaje de:', m.autorNombre);
+          
+          // Notificación visual
+          NotificationSvc.show('💬 Nuevo mensaje', {
+            message: `${m.autorNombre}: ${m.texto.substring(0,60)}${m.texto.length > 60 ? '...' : ''}`,
+            type: 'info',
+            duration: 5000
+          });
+          
+          // Sonido
+          NotificationSvc.playSound();
+          
+          // Marcar como no leído
+          ChatSvc.markAsRead(m.id || m._key, user.id);
+        }
+      });
+    };
+    
+    window.addEventListener('ip-chat-new-messages', handleNewMsg);
+    
+    return ()=>{
+      unsubUnread?.();
+      window.removeEventListener('ip-chat-new-messages', handleNewMsg);
+    };
+  },[user?.id]);
+  
+  // Marcar todos como leídos cuando el módulo Chat se abre
+  useEffect(()=>{
+    ChatSvc.markAllAsRead(user?.id);
+  },[]);
 
   // Enviar mensaje
   const send = async () => {
@@ -13907,6 +14242,7 @@ const App = () => {
   const [col,setCol]=useState(false);
   const [mobOpen,setMobOpen]=useState(false);
   const [toasts,setToasts]=useState([]);
+  const [chatUnread,setChatUnread]=useState(0);  // FASE 3: Chat badge
   // cfg reactivo — se actualiza cuando Config guarda cambios (ip-config-updated)
   const [cfg,setCfgApp]=useState(()=>JSON.parse(localStorage.getItem('ip_config')||'{}'));
   // Inicializar desde localStorage para que los datos aparezcan inmediatamente
@@ -13940,11 +14276,14 @@ const App = () => {
   useEffect(()=>{
     const onCfg = () => setCfgApp(JSON.parse(localStorage.getItem('ip_config')||'{}'));
     const onBackup = (e) => setBackup(e.detail);
+    const onChatBadge = (e) => setChatUnread(e.detail || 0);  // FASE 3: Escuchar badge de Chat
     window.addEventListener('ip-config-updated', onCfg);
     window.addEventListener('ip-backup-updated', onBackup);
+    window.addEventListener('chat-unread-badge', onChatBadge);  // FASE 3
     return ()=>{
       window.removeEventListener('ip-config-updated', onCfg);
       window.removeEventListener('ip-backup-updated', onBackup);
+      window.removeEventListener('chat-unread-badge', onChatBadge);  // FASE 3
     };
   },[]);
 
@@ -14145,7 +14484,7 @@ const App = () => {
       {/* Overlay oscuro para móvil — clic cierra el sidebar */}
       <div className={clx('mob-overlay',mobOpen&&'active')} onClick={()=>setMobOpen(false)}/>
       <Sidebar active={modFinal} onNav={m=>{setMod(m);}} col={col} onToggle={()=>setCol(p=>!p)}
-        user={user} cfg={cfg} permisos={permisos} mobOpen={mobOpen} onMobClose={()=>setMobOpen(false)}/>
+        user={user} cfg={cfg} permisos={permisos} mobOpen={mobOpen} onMobClose={()=>setMobOpen(false)} chatUnread={chatUnread}/>
       <div className="main">
         <Header title={TITLES[modFinal]||modFinal} user={user} onLogout={logout} backup={backup} onMobOpen={()=>setMobOpen(true)}/>
         <div className="content">
