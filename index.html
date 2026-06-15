@@ -13248,6 +13248,9 @@ const Config = () => {
         ? usuarios.map(x=>x.id===perfil.id?perfil:x)
         : [perfil, ...usuarios];
       localStorage.setItem('ip_usuarios', JSON.stringify(list));
+      // FASE 2 — PROPAGACIÓN AUTOMÁTICA: Disparar evento global para que todos
+      // los componentes suscritos se actualicen inmediatamente sin recargar.
+      window.dispatchEvent(new CustomEvent('ip-usuarios-updated', { detail: { perfil, accion: formUser.id ? 'editar' : 'crear' } }));
       // FIX INC-3: Registrar cambio de rol explícito en ip_rol_lock
       // Esto evita que _shouldBeAdmin revierta el rol en la próxima lectura de sesión
       try {
@@ -13294,6 +13297,8 @@ const Config = () => {
       });
       const l=usuarios.map(u=>u.id===id?{...u,activo:false}:u);
       setUsuarios(l); localStorage.setItem('ip_usuarios',JSON.stringify(l));
+      // FASE 2 — PROPAGACIÓN: notificar desactivación de usuario
+      window.dispatchEvent(new CustomEvent('ip-usuarios-updated', { detail: { id, accion: 'desactivar' } }));
       toast('Usuario desactivado. No podrá iniciar sesión.','success');
     } catch(e){ toast('Error al desactivar: '+e.message,'error'); }
   };
@@ -13328,6 +13333,8 @@ const Config = () => {
       const lista = usuarios.filter(u => u.id !== id);
       setUsuarios(lista);
       localStorage.setItem('ip_usuarios', JSON.stringify(lista));
+      // FASE 2 — PROPAGACIÓN: notificar eliminación de usuario
+      window.dispatchEvent(new CustomEvent('ip-usuarios-updated', { detail: { id, accion: 'eliminar' } }));
       setOpenDelUser(null);
       toast('Usuario eliminado de Firestore. La cuenta Auth quedará inactiva sin documento de perfil.','success');
     } catch(e) {
@@ -14861,7 +14868,32 @@ const App = () => {
 
     // Notificar a StorageDiag que hay sesión activa
     window.dispatchEvent(new CustomEvent('ip-user-ready', { detail: { uid: user.id } }));
-    return () => { unsubs.forEach(fn=>fn()); unsubPerfil(); };
+
+    // FASE 3 — PRESENCIA GLOBAL: Registrar usuario como online desde App.
+    // Antes solo se registraba al abrir el módulo Chat.
+    // Ahora cualquier usuario autenticado aparece en el indicador de presencia
+    // independientemente del módulo que esté usando.
+    let unsubPresenciaGlobal = null;
+    if(RTDB_OK && user?.id) {
+      unsubPresenciaGlobal = ChatSvc.setOnline(user.id, user.nombre, {
+        email: user.email || '',
+        cargo: user.cargo || '',
+        rol:   user.rol   || '',
+      });
+      // Suscribir al conteo de presencia para actualizar el Header en tiempo real
+      const unsubConteo = ChatSvc.onPresencia((presenciaData) => {
+        localStorage.setItem('ip_chat_presencia', JSON.stringify(presenciaData));
+        window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: presenciaData }));
+      });
+      unsubs.push(unsubConteo);
+    }
+
+    return () => {
+      unsubs.forEach(fn=>fn());
+      unsubPerfil();
+      // FASE 3: Limpiar presencia global al cerrar sesión o desmontar
+      if(typeof unsubPresenciaGlobal === 'function') unsubPresenciaGlobal();
+    };
   },[user]);
 
   const logout = async () => { localStorage.removeItem('ip_keep_session'); await AuthSvc.logout(); setUser(null); };
@@ -14889,7 +14921,15 @@ const App = () => {
     <div className="page">
       {/* Overlay oscuro para móvil — clic cierra el sidebar */}
       <div className={clx('mob-overlay',mobOpen&&'active')} onClick={()=>setMobOpen(false)}/>
-      <Sidebar active={modFinal} onNav={m=>{setMod(m);}} col={col} onToggle={()=>setCol(p=>!p)}
+      <Sidebar active={modFinal} onNav={m=>{
+        // FASE 1 — CONFIG-GUARD v3: capa de navegación.
+        // Bloquea intento directo de navegar a config sin ser admin.
+        if(m === 'config' && !esAdmin) {
+          toast('Acceso restringido: solo Administradores pueden acceder a Configuración.', 'error');
+          return;
+        }
+        setMod(m);
+      }} col={col} onToggle={()=>setCol(p=>!p)}
         user={user} cfg={cfg} permisos={permisos} mobOpen={mobOpen} onMobClose={()=>setMobOpen(false)} chatUnread={chatUnread}/>
       <div className="main">
         <Header title={TITLES[modFinal]||modFinal} user={user} onLogout={logout} backup={backup} onMobOpen={()=>setMobOpen(true)}/>
@@ -14904,7 +14944,11 @@ const App = () => {
     <BusquedaGlobal
       tareas={tareas} clientes={clientes} equipo={equipo}
       proyectos={proyectos} facturas={facturas}
-      onNav={m=>setMod(m)}/>
+      onNav={m=>{
+        // FASE 1 — CONFIG-GUARD v3: BusquedaGlobal también protegida
+        if(m === 'config' && !esAdmin) return;
+        setMod(m);
+      }}/>
     <div style={{position:'fixed',top:16,right:16,zIndex:2000,display:'flex',flexDirection:'column',gap:8}}>
       {toasts.map(t=><Toast key={t.id} msg={t.msg} type={t.type} onClose={()=>setToasts(p=>p.filter(x=>x.id!==t.id))}/>)}
     </div>
