@@ -2186,6 +2186,114 @@ const BusquedaGlobal = ({tareas,clientes,equipo,proyectos,facturas,onNav}) => {
   </div>;
 };
 
+// PresenciaBadge — Subcomponente separado para el indicador de usuarios online en Header.
+// Separado del Header para que sus hooks (useState, useEffect, useRef) sean siempre
+// válidos independientemente del ciclo de render del Header.
+const AVATAR_COLS_P = ['#1E3A5F','#C9A84C','#1A6B3A','#7C3AED','#0F766E','#BE185D','#B45309'];
+const avatarColorP = (id) => {
+  if(!id) return AVATAR_COLS_P[0];
+  let h = 0;
+  for(let i=0; i<id.length; i++) h = (h*31 + id.charCodeAt(i)) % AVATAR_COLS_P.length;
+  return AVATAR_COLS_P[h];
+};
+
+const PresenciaBadge = ({ presencia }) => {
+  const [showDrop, setShowDrop] = React.useState(false);
+  const dropRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if(!showDrop) return;
+    const close = (e) => {
+      if(dropRef.current && !dropRef.current.contains(e.target)) setShowDrop(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [showDrop]);
+
+  return (
+    <div ref={dropRef} className="mob-hide" style={{position:'relative'}}>
+      <button
+        onClick={() => setShowDrop(s => !s)}
+        title={`${presencia.online} usuario${presencia.online!==1?'s':''} en línea — clic para ver detalles`}
+        style={{display:'flex',alignItems:'center',gap:6,fontSize:11,fontWeight:600,
+          padding:'4px 10px',borderRadius:20,cursor:'pointer',
+          border:'1px solid rgba(74,222,128,.25)',background:'rgba(74,222,128,.08)',color:'#4ade80'}}>
+        <span style={{width:6,height:6,borderRadius:'50%',background:'#4ade80',display:'inline-block',animation:'pulse 1.6s infinite'}}/>
+        {presencia.online} en línea
+        <span style={{fontSize:9,opacity:.7}}>{showDrop?'▲':'▼'}</span>
+      </button>
+      {showDrop && (
+        <div style={{
+          position:'absolute',top:'calc(100% + 6px)',right:0,zIndex:9999,
+          background:'#162030',border:'1px solid #243447',borderRadius:10,
+          minWidth:270,maxHeight:360,overflowY:'auto',
+          boxShadow:'0 8px 24px rgba(0,0,0,.5)',
+        }}>
+          <div style={{padding:'8px 14px 6px',fontSize:10,color:'#64748b',
+            textTransform:'uppercase',letterSpacing:1,fontWeight:700,borderBottom:'1px solid #243447'}}>
+            Usuarios conectados ({presencia.online})
+          </div>
+          {presencia.users.length === 0 && (
+            <div style={{padding:'14px',fontSize:12,color:'#475569',textAlign:'center',fontStyle:'italic'}}>
+              Ningún usuario activo
+            </div>
+          )}
+          {presencia.users.map(u => (
+            <div key={u.id} style={{padding:'9px 14px',borderBottom:'1px solid rgba(36,52,71,.4)'}}>
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+                <div style={{width:28,height:28,borderRadius:'50%',flexShrink:0,
+                  background:avatarColorP(u.id),
+                  display:'flex',alignItems:'center',justifyContent:'center',
+                  color:'#fff',fontSize:12,fontWeight:700}}>
+                  {(u.nombre||'?').charAt(0).toUpperCase()}
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:12,fontWeight:600,color:'#e2e8f0',
+                    overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                    {u.nombre}
+                  </div>
+                  {u.email && (
+                    <div style={{fontSize:10,color:'#64748b',
+                      overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                      {u.email}
+                    </div>
+                  )}
+                </div>
+                <span style={{width:7,height:7,borderRadius:'50%',background:'#4ade80',
+                  flexShrink:0,boxShadow:'0 0 4px #4ade80'}}/>
+              </div>
+              <div style={{display:'flex',gap:5,flexWrap:'wrap',marginLeft:36}}>
+                {u.cargo && (
+                  <span style={{fontSize:9,padding:'1px 6px',borderRadius:99,
+                    background:'rgba(30,58,95,.4)',color:'#93c5fd',border:'1px solid rgba(59,130,246,.2)'}}>
+                    {u.cargo}
+                  </span>
+                )}
+                {u.rol && (
+                  <span style={{fontSize:9,padding:'1px 6px',borderRadius:99,
+                    background:'rgba(201,168,76,.1)',color:'#C9A84C',
+                    border:'1px solid rgba(201,168,76,.2)',textTransform:'capitalize'}}>
+                    {u.rol}
+                  </span>
+                )}
+                <span style={{fontSize:9,padding:'1px 6px',borderRadius:99,
+                  background:'rgba(74,222,128,.08)',color:'#4ade80',border:'1px solid rgba(74,222,128,.2)'}}>
+                  Activo
+                </span>
+              </div>
+              {u.horaConexion && (
+                <div style={{fontSize:9,color:'#475569',marginLeft:36,marginTop:2}}>
+                  Conectado: {new Date(u.horaConexion).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const Header = ({title,user,onLogout,backup,onMobOpen}) => {
   const [online,     setOnline]    = React.useState(navigator.onLine);
   const [queueN,     setQueueN]    = React.useState(0);
@@ -2301,13 +2409,8 @@ const Header = ({title,user,onLogout,backup,onMobOpen}) => {
         <span style={{fontSize:13}}>{pushOn?'🔔':'🔕'}</span>
       </div>
       
-      {/* NEW: Indicador de usuarios conectados (Global, de todos los módulos) */}
-      <div className="mob-hide" title={`${presencia.online} usuario${presencia.online!==1?'s':''} en línea`}
-        style={{display:'flex',alignItems:'center',gap:6,fontSize:11,fontWeight:600,padding:'4px 10px',borderRadius:20,
-          border:'1px solid rgba(74,222,128,.25)',background:'rgba(74,222,128,.08)',color:'#4ade80'}}>
-        <span style={{width:6,height:6,borderRadius:'50%',background:'#4ade80',display:'inline-block',animation:'pulse 1.6s infinite'}}/>
-        {presencia.online} en línea
-      </div>
+      {/* NEW: Indicador de usuarios conectados — subcomponente aislado (hooks válidos) */}
+      <PresenciaBadge presencia={presencia}/>
       {/* Indicador auto-backup */}
       <div className="mob-hide" title={lastBackup?`Último backup: ${new Date(lastBackup.ts).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})}`:''} style={{display:'flex',alignItems:'center',gap:6,fontSize:11,fontWeight:600,padding:'4px 12px',borderRadius:20,border:'1px solid',borderColor:lastBackup?'rgba(74,222,128,.25)':'#243447',background:lastBackup?'rgba(26,107,58,.15)':'transparent',color:lastBackup?'#4ade80':'#475569'}}>
         <span style={{width:7,height:7,borderRadius:'50%',background:lastBackup?'#4ade80':'#334155',display:'inline-block'}}/>
@@ -7978,30 +8081,30 @@ const ChatSvc = {
     return () => { ref.off('value', handler); clearInterval(tickInterval); };
   },
 
-  // Presencia online
-  // V20-FIX: ahora persiste el campo `ts` actualizado, expone la lista completa de
-  // usuarios online (no solo el conteo), y considera offline cualquier sesión sin
-  // heartbeat reciente (>90s) aunque RTDB la marque como online (sesiones colgadas).
-  setOnline: (userId, nombre) => {
+  // Presencia online — FASE 7: Enriquecida con email, cargo, rol, horaConexion
+  setOnline: (userId, nombre, extraData) => {
     if(!RTDB_OK || !userId) return null;
     const ref = _rtdb.ref(ChatSvc.PATH_PRESENCIA+'/'+userId);
+    const horaConexion = Date.now();
     const heartbeat = () => ref.set({
-      nombre: nombre || 'Usuario',
-      online: true,
-      ts: firebase.database.ServerValue.TIMESTAMP
+      nombre:        nombre || 'Usuario',
+      email:         extraData?.email || '',
+      cargo:         extraData?.cargo || '',
+      rol:           extraData?.rol   || '',
+      horaConexion:  horaConexion,
+      online:        true,
+      ts:            firebase.database.ServerValue.TIMESTAMP
     });
     heartbeat();
     ref.onDisconnect().update({online:false, ts: firebase.database.ServerValue.TIMESTAMP});
-    // Heartbeat cada 30s para mantener "online" aunque haya inactividad
     const hbInterval = setInterval(heartbeat, 30000);
-    // Devolver función para detener heartbeat al desmontar
     return () => {
       clearInterval(hbInterval);
       try { ref.update({online:false, ts: firebase.database.ServerValue.TIMESTAMP}); } catch(_){}
     };
   },
 
-  // onPresencia: callback recibe { online: number, users: [{id, nombre}] }
+  // onPresencia: callback recibe { online: number, users: [{id, nombre, email, cargo, rol, horaConexion}] }
   onPresencia: (cb) => {
     if(!RTDB_OK) {
       cb({ online: 0, users: [] });
@@ -8013,13 +8116,19 @@ const ChatSvc = {
       const now = Date.now();
       const users = Object.entries(lastData)
         .filter(([,v])=>v && v.online === true)
-        // Filtrar sesiones colgadas: heartbeat más viejo que 90s = offline real
         .filter(([,v])=>!v.ts || (now - v.ts) < 90000)
-        .map(([id,v])=>({ id, nombre: v.nombre || 'Usuario' }));
+        .map(([id,v])=>({
+          id,
+          nombre:       v.nombre       || 'Usuario',
+          email:        v.email        || '',
+          cargo:        v.cargo        || '',
+          rol:          v.rol          || '',
+          horaConexion: v.horaConexion || v.ts || now,
+          estado:       'Activo',
+        }));
       cb({ online: users.length, users });
     };
     const handler = ref.on('value', snap => { lastData = snap.val()||{}; compute(); });
-    // Re-evaluar cada 15s para depurar sesiones colgadas
     const tickInterval = setInterval(compute, 15000);
     return () => { ref.off('value', handler); clearInterval(tickInterval); };
   },
@@ -8131,7 +8240,11 @@ const Chat = () => {
     const unsubMsgs    = ChatSvc.onMessages(setMsgs);
     const unsubTyping  = ChatSvc.onTyping(user.id, setTyping);
     const unsubPresencia = ChatSvc.onPresencia(setPresencia);
-    const unsubOnline  = ChatSvc.setOnline(user.id, user.nombre);
+    const unsubOnline  = ChatSvc.setOnline(user.id, user.nombre, {
+      email: user.email || '',
+      cargo: user.cargo || '',
+      rol:   user.rol   || '',
+    });
     return ()=>{
       unsubMsgs?.(); unsubTyping?.(); unsubPresencia?.();
       if(typeof unsubOnline === 'function') unsubOnline();
@@ -8249,29 +8362,50 @@ const Chat = () => {
         {!rtdb&&<span style={{fontSize:10,color:'#475569',maxWidth:200,lineHeight:1.3}}>
           Activa Realtime DB en Firebase para chat en tiempo real
         </span>}
-        {/* Dropdown lista de usuarios online */}
+        {/* Dropdown lista de usuarios online — FASE 7: Datos enriquecidos */}
         {showOnline && rtdb && <div style={{
           position:'absolute',top:'calc(100% + 4px)',right:16,zIndex:10,
-          background:'#162030',border:'1px solid #243447',borderRadius:8,
-          padding:'8px 0',minWidth:200,maxHeight:280,overflowY:'auto',
+          background:'#162030',border:'1px solid #243447',borderRadius:10,
+          padding:'8px 0',minWidth:260,maxHeight:340,overflowY:'auto',
           boxShadow:'0 4px 16px rgba(0,0,0,.4)'}}>
-          <div style={{padding:'4px 12px',fontSize:10,color:'#64748b',textTransform:'uppercase',letterSpacing:1,fontWeight:700}}>
+          <div style={{padding:'6px 14px 4px',fontSize:10,color:'#64748b',textTransform:'uppercase',letterSpacing:1,fontWeight:700,borderBottom:'1px solid #243447',marginBottom:4}}>
             Conectados ({presencia.online})
           </div>
-          {presencia.users.length===0 && <div style={{padding:'8px 12px',fontSize:12,color:'#475569',fontStyle:'italic'}}>
+          {presencia.users.length===0 && <div style={{padding:'12px',fontSize:12,color:'#475569',fontStyle:'italic',textAlign:'center'}}>
             Nadie más conectado
           </div>}
           {presencia.users.map(u=>(
-            <div key={u.id} style={{display:'flex',alignItems:'center',gap:8,padding:'6px 12px'}}>
-              <div style={{width:24,height:24,borderRadius:'50%',background:avatarColor(u.id),
-                display:'flex',alignItems:'center',justifyContent:'center',
-                color:'#fff',fontSize:11,fontWeight:700,flexShrink:0}}>
-                {(u.nombre||'?').charAt(0).toUpperCase()}
+            <div key={u.id} style={{padding:'8px 14px',borderBottom:'1px solid rgba(36,52,71,.5)'}}>
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:3}}>
+                <div style={{width:28,height:28,borderRadius:'50%',background:avatarColor(u.id),
+                  display:'flex',alignItems:'center',justifyContent:'center',
+                  color:'#fff',fontSize:12,fontWeight:700,flexShrink:0}}>
+                  {(u.nombre||'?').charAt(0).toUpperCase()}
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:12,fontWeight:600,color:'#e2e8f0',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                    {u.nombre}{u.id===user?.id?' (tú)':''}
+                  </div>
+                  {u.email && <div style={{fontSize:10,color:'#64748b',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                    {u.email}
+                  </div>}
+                </div>
+                <span style={{width:7,height:7,borderRadius:'50%',background:'#4ade80',flexShrink:0,boxShadow:'0 0 4px #4ade80'}}/>
               </div>
-              <span style={{fontSize:12,color:'#cbd5e1',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                {u.nombre}{u.id===user?.id?' (tú)':''}
-              </span>
-              <span style={{width:6,height:6,borderRadius:'50%',background:'#4ade80',flexShrink:0}}/>
+              <div style={{display:'flex',gap:6,flexWrap:'wrap',marginLeft:36}}>
+                {u.cargo && <span style={{fontSize:9,padding:'1px 6px',borderRadius:99,background:'rgba(30,58,95,.4)',color:'#93c5fd',border:'1px solid rgba(59,130,246,.2)'}}>
+                  {u.cargo}
+                </span>}
+                {u.rol && <span style={{fontSize:9,padding:'1px 6px',borderRadius:99,background:'rgba(201,168,76,.1)',color:'#C9A84C',border:'1px solid rgba(201,168,76,.2)',textTransform:'capitalize'}}>
+                  {u.rol}
+                </span>}
+                <span style={{fontSize:9,padding:'1px 6px',borderRadius:99,background:'rgba(74,222,128,.08)',color:'#4ade80',border:'1px solid rgba(74,222,128,.2)'}}>
+                  Activo
+                </span>
+              </div>
+              {u.horaConexion && <div style={{fontSize:9,color:'#475569',marginLeft:36,marginTop:2}}>
+                Conectado: {new Date(u.horaConexion).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})}
+              </div>}
             </div>
           ))}
         </div>}
@@ -11083,6 +11217,24 @@ const Exportar = () => {
         y += RESP_BOX_H + 6;
       } // fin mostrarResponsablesInforme
 
+      // ── SECCIONES PERSONALIZADAS (custom_*) — FASE 5 ─────────
+      // Iterar pCfg.secciones ordenadas para renderizar secciones custom
+      // que el usuario creó en Personalizar → Estructura.
+      const seccionesOrdenPDF = [...(pCfg.secciones||[])].sort((a,b)=>a.orden-b.orden);
+      seccionesOrdenPDF.filter(s => s.custom && s.visible).forEach(sec => {
+        chkPage(30);
+        y += SEC_GAP;
+        sectionHeader(sec.titulo || sec.label || 'SECCIÓN PERSONALIZADA');
+        // Renderizar como bloque de texto informativo
+        doc.setFont(FF,'normal'); setColor(C.textR,true); doc.setFontSize(FS(8.5));
+        const infoLines = doc.splitTextToSize(
+          `Sección personalizada: "${sec.titulo || sec.label}". Configure el contenido desde Personalizar → Estructura.`,
+          IW-6
+        );
+        infoLines.forEach(ln => { chkPage(8); txt(ln, M+3, y); y += 5.5; });
+        y += 6; hrLine(y); y += SEC_GAP;
+      });
+
       // ── CONCLUSIÓN (si existe en textosSeccion) ─────────────
       if(pCfg.textosSeccion?.conclusion?.trim()) {
         chkPage(25);
@@ -12066,6 +12218,94 @@ const StoragePanel = () => {
 // Arquitectura: Single Source of Truth via localStorage 'ip_pdf_personalizar'
 // Todos los módulos que generan PDFs consumen getPdfPersonalizar()
 // ══════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// FASE 6 FIX — SeccionTituloInput
+// Componente aislado para editar títulos de sección SIN perder el cursor.
+// CAUSA RAÍZ ORIGINAL: onChange en PersonalizarTab llamaba saveSilent() → dispatchEvent
+// → re-render completo de PersonalizarTab → input reconstruido → cursor al inicio.
+// SOLUCIÓN: estado local (useState) completamente independiente del padre.
+// Solo propaga el valor al padre en onBlur mediante el callback onCommit(id, titulo).
+// ══════════════════════════════════════════════════════════════════════════════
+const SeccionTituloInput = React.memo(({ secId, initialValue, visible, onCommit }) => {
+  const [val, setVal] = useState(initialValue);
+  // Sincronizar si el padre cambia el initialValue (ej: reset)
+  const prevInit = useRef(initialValue);
+  useEffect(() => {
+    if(initialValue !== prevInit.current) {
+      setVal(initialValue);
+      prevInit.current = initialValue;
+    }
+  }, [initialValue]);
+
+  return (
+    <input
+      className="inp"
+      value={val}
+      onChange={e => setVal(e.target.value)}
+      onBlur={() => onCommit(secId, val)}
+      style={{
+        fontSize:12, fontWeight:600,
+        background:'transparent', border:'none', padding:'2px 0',
+        color: visible ? '#e2e8f0' : '#475569',
+        width:'100%', outline:'none',
+      }}
+      placeholder="Título de la sección..."
+    />
+  );
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TextoInput — input de texto aislado para Textos y Contenido en PersonalizarTab.
+// MISMA CAUSA RAÍZ que SeccionTituloInput: onChange → saveSilent → setPdfCfg
+// → re-render del padre → input reconstruido → cursor al inicio.
+// SOLUCIÓN: estado local con useState. Solo sube al padre en onBlur (onCommit).
+// ══════════════════════════════════════════════════════════════════════════════
+const TextoInput = React.memo(({ initialValue, placeholder, onCommit }) => {
+  const [val, setVal] = useState(initialValue);
+  const prevRef = useRef(initialValue);
+  useEffect(() => {
+    if (initialValue !== prevRef.current) {
+      setVal(initialValue);
+      prevRef.current = initialValue;
+    }
+  }, [initialValue]);
+  return (
+    <input
+      className="inp"
+      value={val}
+      onChange={e => setVal(e.target.value)}
+      onBlur={() => onCommit(val)}
+      placeholder={placeholder}
+    />
+  );
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TextoTextarea — textarea aislado para Textos y Contenido.
+// Mismo patrón que TextoInput: estado 100% local, persiste solo en onBlur.
+// ══════════════════════════════════════════════════════════════════════════════
+const TextoTextarea = React.memo(({ initialValue, placeholder, rows, onCommit }) => {
+  const [val, setVal] = useState(initialValue);
+  const prevRef = useRef(initialValue);
+  useEffect(() => {
+    if (initialValue !== prevRef.current) {
+      setVal(initialValue);
+      prevRef.current = initialValue;
+    }
+  }, [initialValue]);
+  return (
+    <textarea
+      className="inp"
+      rows={rows || 3}
+      value={val}
+      onChange={e => setVal(e.target.value)}
+      onBlur={() => onCommit(val)}
+      placeholder={placeholder}
+      style={{ resize: 'vertical', minHeight: `${(rows || 3) * 1.6}em` }}
+    />
+  );
+});
+
 const PersonalizarTab = ({ toast }) => {
 
   // ── Estructura DEFAULT completa (SST) ──────────────────────────────
@@ -12196,11 +12436,38 @@ const PersonalizarTab = ({ toast }) => {
     saveSilent({ secciones: next });
   };
 
-  const updateTituloSeccion = (id, titulo) => {
+  // FASE 6 FIX — commitTituloSeccion usa saveSilent (sin toast).
+  // saveCfg dispara toast('Configuracion guardada') → spam en cada onBlur.
+  // saveSilent persiste silenciosamente y dispara ip-pdf-config-updated para el PDF.
+  const commitTituloSeccion = (id, titulo) => {
     const next = (pdfCfg.secciones||DEFAULT_CFG.secciones).map(s =>
       s.id === id ? { ...s, titulo } : s
     );
     saveSilent({ secciones: next });
+  };
+
+  // FASE 4 — Agregar Sección personalizada
+  const agregarSeccion = () => {
+    const newId = 'custom_' + Date.now();
+    const nuevoOrden = (pdfCfg.secciones||DEFAULT_CFG.secciones).length + 1;
+    const nueva = {
+      id: newId,
+      label: 'Nueva Sección',
+      titulo: 'NUEVA SECCIÓN',
+      visible: true,
+      orden: nuevoOrden,
+      custom: true,
+    };
+    const next = [...(pdfCfg.secciones||DEFAULT_CFG.secciones), nueva];
+    saveSilent({ secciones: next });   // silencioso — confirma sin spam de toast
+    toast('Sección agregada', 'success');
+  };
+
+  // FASE 4 — Eliminar sección personalizada (solo las creadas por el usuario)
+  const eliminarSeccion = (id) => {
+    const next = (pdfCfg.secciones||DEFAULT_CFG.secciones).filter(s => s.id !== id);
+    saveSilent({ secciones: next });
+    toast('Sección eliminada', 'success');
   };
 
   // Drag & drop reorden de secciones
@@ -12516,23 +12783,17 @@ const PersonalizarTab = ({ toast }) => {
                 background:'#fff', transition:'left .2s', left: sec.visible ? 16 : 2,
               }}/>
             </div>
-            {/* Etiqueta y título editable */}
+            {/* Etiqueta y título editable — FASE 6 FIX: input con estado local para evitar pérdida de cursor */}
             <div style={{flex:1, minWidth:0}}>
               <p style={{fontSize:10, color:'#475569', margin:'0 0 2px', textTransform:'uppercase', letterSpacing:'.3px'}}>
-                {sec.label}
+                {sec.label}{sec.custom ? ' ✦ Personalizada' : ''}
               </p>
-              <input
-                className="inp"
-                value={sec.titulo||''}
-                onChange={e => updateTituloSeccion(sec.id, e.target.value)}
-                onBlur={() => saveCfg({ secciones: pdfCfg.secciones })}
-                style={{
-                  fontSize:12, fontWeight:600,
-                  background:'transparent', border:'none', padding:'2px 0',
-                  color: sec.visible ? '#e2e8f0' : '#475569',
-                  width:'100%',
-                }}
-                placeholder="Título de la sección..."
+              <SeccionTituloInput
+                key={sec.id}
+                secId={sec.id}
+                initialValue={sec.titulo||''}
+                visible={sec.visible}
+                onCommit={commitTituloSeccion}
               />
             </div>
             {/* Indicador estado */}
@@ -12544,13 +12805,36 @@ const PersonalizarTab = ({ toast }) => {
             }}>
               {sec.visible ? 'Activa' : 'Oculta'}
             </span>
+            {/* FASE 4: Botón eliminar solo para secciones personalizadas */}
+            {sec.custom && (
+              <button
+                title="Eliminar sección personalizada"
+                onClick={() => eliminarSeccion(sec.id)}
+                style={{background:'none',border:'none',cursor:'pointer',color:'#ef4444',padding:'2px 4px',borderRadius:4,flexShrink:0}}
+              ><Ico n="trash" s={13}/></button>
+            )}
           </div>
         ))}
       </div>
 
+      {/* FASE 4: Botón "Agregar Sección" */}
+      <button
+        onClick={agregarSeccion}
+        style={{
+          marginTop:12, width:'100%', display:'flex', alignItems:'center', justifyContent:'center',
+          gap:8, padding:'9px 0', borderRadius:9, cursor:'pointer', fontSize:12, fontWeight:600,
+          background:'rgba(201,168,76,.08)', border:'1px dashed rgba(201,168,76,.35)',
+          color:'#C9A84C', transition:'all .15s',
+        }}
+        onMouseEnter={e=>{e.currentTarget.style.background='rgba(201,168,76,.15)';}}
+        onMouseLeave={e=>{e.currentTarget.style.background='rgba(201,168,76,.08)';}}
+      >
+        <Ico n="plus" s={14}/> Agregar Sección
+      </button>
+
       {/* Resumen */}
       <div style={{
-        marginTop:16, padding:'10px 14px', borderRadius:8,
+        marginTop:12, padding:'10px 14px', borderRadius:8,
         background:'rgba(51,65,85,.2)', border:'1px solid #243447',
         display:'flex', justifyContent:'space-between', alignItems:'center',
       }}>
@@ -12566,73 +12850,86 @@ const PersonalizarTab = ({ toast }) => {
   );
 
   // ── TAB: Textos y Contenido ──────────────────────────────────────
+  // CAUSA RAÍZ del bug "cursor salta al inicio":
+  // onChange → saveSilent → setPdfCfg → re-render PersonalizarTab
+  // → el input/textarea se reconstruye → cursor al inicio, foco perdido.
+  // SOLUCIÓN: cada campo usa estado local (no toca pdfCfg en cada tecla).
+  // El valor sube al padre ÚNICAMENTE en onBlur mediante saveCfg/saveSilent.
+  // Mismo patrón que SeccionTituloInput (sección Estructura).
   const renderTextos = () => (
     <div>
       <ST title="Textos del Documento"
         subtitle="Personaliza los textos que aparecen en el PDF. Se aplican automáticamente en la generación."/>
 
       <Field label="Título principal del documento">
-        <input className="inp" value={pdfCfg.tituloDocumento||'INFORME DE GESTION'}
-          onChange={e=>saveSilent({tituloDocumento:e.target.value})}
-          onBlur={e=>saveCfg({tituloDocumento:e.target.value})}
-          placeholder="INFORME DE GESTION"/>
+        <TextoInput
+          initialValue={pdfCfg.tituloDocumento||'INFORME DE GESTION'}
+          placeholder="INFORME DE GESTION"
+          onCommit={v=>saveCfg({tituloDocumento:v})}
+        />
         <p style={{fontSize:10, color:'#475569', margin:'4px 0 0'}}>
           Aparece en la portada y encabezado de cada página
         </p>
       </Field>
 
       <Field label="Subtítulo de portada (opcional)">
-        <input className="inp" value={pdfCfg.subtituloDocumento||''}
-          onChange={e=>saveSilent({subtituloDocumento:e.target.value})}
-          onBlur={e=>saveCfg({subtituloDocumento:e.target.value})}
-          placeholder="Ej: Período Enero – Junio 2025"/>
+        <TextoInput
+          initialValue={pdfCfg.subtituloDocumento||''}
+          placeholder="Ej: Período Enero – Junio 2025"
+          onCommit={v=>saveCfg({subtituloDocumento:v})}
+        />
       </Field>
 
       <Field label="Texto de Introducción">
-        <textarea className="inp" rows={4}
-          value={pdfCfg.textosSeccion?.introduccion||''}
-          onChange={e=>saveSilent({textosSeccion:{...(pdfCfg.textosSeccion||{}),introduccion:e.target.value}})}
-          onBlur={e=>saveCfg({textosSeccion:{...(pdfCfg.textosSeccion||{}),introduccion:e.target.value}})}
-          placeholder="Texto introductorio que aparecerá al inicio del informe..."/>
+        <TextoTextarea
+          rows={4}
+          initialValue={pdfCfg.textosSeccion?.introduccion||''}
+          placeholder="Texto introductorio que aparecerá al inicio del informe..."
+          onCommit={v=>saveCfg({textosSeccion:{...(pdfCfg.textosSeccion||{}),introduccion:v}})}
+        />
         <p style={{fontSize:10, color:'#475569', margin:'4px 0 0'}}>
           Se incluirá en la sección INTRODUCCION del PDF si está activada
         </p>
       </Field>
 
       <Field label="Conclusión del Informe">
-        <textarea className="inp" rows={3}
-          value={pdfCfg.textosSeccion?.conclusion||''}
-          onChange={e=>saveSilent({textosSeccion:{...(pdfCfg.textosSeccion||{}),conclusion:e.target.value}})}
-          onBlur={e=>saveCfg({textosSeccion:{...(pdfCfg.textosSeccion||{}),conclusion:e.target.value}})}
-          placeholder="Párrafo de cierre y conclusiones generales..."/>
+        <TextoTextarea
+          rows={3}
+          initialValue={pdfCfg.textosSeccion?.conclusion||''}
+          placeholder="Párrafo de cierre y conclusiones generales..."
+          onCommit={v=>saveCfg({textosSeccion:{...(pdfCfg.textosSeccion||{}),conclusion:v}})}
+        />
       </Field>
 
       <Field label="Observaciones Estándar">
-        <textarea className="inp" rows={3}
-          value={pdfCfg.textosSeccion?.observaciones||''}
-          onChange={e=>saveSilent({textosSeccion:{...(pdfCfg.textosSeccion||{}),observaciones:e.target.value}})}
-          onBlur={e=>saveCfg({textosSeccion:{...(pdfCfg.textosSeccion||{}),observaciones:e.target.value}})}
-          placeholder="Observaciones que se incluirán en el informe de forma estándar..."/>
+        <TextoTextarea
+          rows={3}
+          initialValue={pdfCfg.textosSeccion?.observaciones||''}
+          placeholder="Observaciones que se incluirán en el informe de forma estándar..."
+          onCommit={v=>saveCfg({textosSeccion:{...(pdfCfg.textosSeccion||{}),observaciones:v}})}
+        />
       </Field>
 
       <ST title="Encabezado y Pie" subtitle="Textos adicionales en cada página"/>
 
       <Field label="Texto personalizado en pie de página">
-        <input className="inp" value={pdfCfg.piePersonalizado||''}
-          onChange={e=>saveSilent({piePersonalizado:e.target.value})}
-          onBlur={e=>saveCfg({piePersonalizado:e.target.value})}
-          placeholder="Ej: Documento confidencial – Integra Consultores GR"/>
+        <TextoInput
+          initialValue={pdfCfg.piePersonalizado||''}
+          placeholder="Ej: Documento confidencial – Integra Consultores GR"
+          onCommit={v=>saveCfg({piePersonalizado:v})}
+        />
         <p style={{fontSize:10, color:'#475569', margin:'4px 0 0'}}>
           Aparece centrado en el pie de todas las páginas
         </p>
       </Field>
 
       <Field label="Notas adicionales (al final del informe)">
-        <textarea className="inp" rows={3}
-          value={pdfCfg.notasAdicionales||''}
-          onChange={e=>saveSilent({notasAdicionales:e.target.value})}
-          onBlur={e=>saveCfg({notasAdicionales:e.target.value})}
-          placeholder="Observaciones o información adicional al cierre del documento..."/>
+        <TextoTextarea
+          rows={3}
+          initialValue={pdfCfg.notasAdicionales||''}
+          placeholder="Observaciones o información adicional al cierre del documento..."
+          onCommit={v=>saveCfg({notasAdicionales:v})}
+        />
       </Field>
     </div>
   );
@@ -12838,16 +13135,13 @@ const Config = () => {
   const [formUser,setFormUser]=useState({});
   const [qrRef,setQrRef]=useState(null);
   const [newItem,setNewItem]=useState('');
-  // ── NUEVOS ESTADOS V13.1: Eliminar usuario + Cambiar contraseña ──────────
-  // openDelUser: id del usuario pendiente de confirmación de borrado permanente
   const [openDelUser,setOpenDelUser]=useState(null);
-  // openPwd: {id, nombre, email} del usuario al que se cambiará contraseña
   const [openPwd,setOpenPwd]=useState(null);
-  // formPwd: campos del modal de cambio de contraseña
   const [formPwd,setFormPwd]=useState({newPass:'',confirmPass:''});
-  // loadingPwd / loadingDel: spinners de operaciones asíncronas
   const [loadingPwd,setLoadingPwd]=useState(false);
   const [loadingDel,setLoadingDel]=useState(false);
+  // FASE 3: Estado para asignación de rol al nuevo cargo
+  const [newCargoRol,setNewCargoRol]=useState('consultor');
   // ─────────────────────────────────────────────────────────────────────────
   const isAdmin = user?.rol==='administrador';
   const PERMS = PERM_MODS;
@@ -12879,7 +13173,22 @@ const Config = () => {
   },[]);
 
   const saveCfg=c=>{setCfg(c);localStorage.setItem('ip_config',JSON.stringify(c));window.dispatchEvent(new CustomEvent('ip-config-updated'));toast('Configuración guardada','success');};
-  // MEJORA-4: Soporte multi-formato para logo institucional (PNG con transparencia, JPG, JPEG, WebP, SVG, GIF, BMP)
+
+  // FASE 1 — GUARDIA ADMIN: ubicada DESPUÉS de todos los hooks (React rules of hooks)
+  // Capas 1 y 2 ya bloquean en Sidebar y App. Esta es la capa 3 (defensa en profundidad).
+  if(!isAdmin) {
+    return (
+      <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
+        height:'60vh',gap:16,color:'#475569',textAlign:'center',padding:20}}>
+        <div style={{fontSize:48}}>🔒</div>
+        <div>
+          <p style={{fontSize:15,fontWeight:600,color:'#e2e8f0',margin:'0 0 6px'}}>Acceso Restringido</p>
+          <p style={{fontSize:13,margin:0}}>Solo los Administradores pueden acceder a Configuración.</p>
+        </div>
+      </div>
+    );
+  }
+  // MEJORA-4: Soporte multi-formato para logo institucional (PNG con transparencia, JPG, JPEG, WebP, SVG, GIF, BMP) (PNG con transparencia, JPG, JPEG, WebP, SVG, GIF, BMP)
   const loadLogo=e=>{
     const f=e.target.files[0];
     if(!f)return;
@@ -12923,6 +13232,7 @@ const Config = () => {
         nombre:   formUser.nombre.trim(),
         email:    formUser.email.trim().toLowerCase(),
         rol:      formUser.rol || 'consultor',
+        cargo:    formUser.cargo || '',   // FASE 3: campo cargo
         activo:   formUser.activo !== false,
         permisos: formUser.permisos || {},
         creadoEn: formUser.creadoEn || new Date().toISOString(),
@@ -13514,9 +13824,9 @@ const Config = () => {
       </div>
       <div className="card" style={{overflowX:'auto',marginBottom:14}}>
         <table className="tbl">
-          <thead><tr>{['Nombre','Email','Rol','Estado','Acciones'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+          <thead><tr>{['Nombre','Email','Cargo','Rol','Estado','Acciones'].map(h=><th key={h}>{h}</th>)}</tr></thead>
           <tbody>
-            {usuarios.length===0&&<tr><td colSpan={5} style={{textAlign:'center',color:'#475569',padding:32}}>Sin usuarios registrados. El admin es el usuario raíz.</td></tr>}
+            {usuarios.length===0&&<tr><td colSpan={6} style={{textAlign:'center',color:'#475569',padding:32}}>Sin usuarios registrados. El admin es el usuario raíz.</td></tr>}
             {usuarios.map(u=>{
               const inactivo = u.activo===false;
               return <tr key={u.id} style={inactivo?{opacity:.55,background:'rgba(153,27,27,.04)'}:{}}>
@@ -13535,6 +13845,7 @@ const Config = () => {
                   </div>
                 </td>
                 <td style={{color:'#94a3b8',fontSize:12}}>{u.email}</td>
+                <td style={{color:'#93c5fd',fontSize:12}}>{u.cargo||<span style={{color:'#475569'}}>—</span>}</td>
                 <td><SBadge s={u.rol}/></td>
                 <td><SBadge s={inactivo?'inactivo':'activo'}/></td>
                 <td>
@@ -13612,6 +13923,26 @@ const Config = () => {
           <p style={{fontSize:10,color:'#C9A84C',margin:'4px 0 0',display:'flex',alignItems:'center',gap:4}}>
             ⚡ Al cambiar rol, los permisos se actualizan automáticamente. Puede ajustar manualmente abajo.
           </p>
+          </F>
+          {/* FASE 3: Campo Cargo con propagación automática de rol */}
+          <F label="Cargo"><select className="inp" value={formUser.cargo||''} onChange={e=>{
+            const nombreCargo = e.target.value;
+            const cargoObj = cargos.find(c=>c.nombre===nombreCargo);
+            if(cargoObj?.rol) {
+              const permsDefault = ROL_PERMISOS[cargoObj.rol] || {};
+              setFormUser(p=>({...p, cargo: nombreCargo, rol: cargoObj.rol, permisos: permsDefault}));
+            } else {
+              setFormUser(p=>({...p, cargo: nombreCargo}));
+            }
+          }}>
+            <option value="">Sin cargo asignado</option>
+            {cargos.map(c=><option key={c.id} value={c.nombre}>{c.nombre}{c.rol ? ` (${c.rol})` : ''}</option>)}
+          </select>
+          {formUser.cargo && cargos.find(c=>c.nombre===formUser.cargo)?.rol && (
+            <p style={{fontSize:10,color:'#4ade80',margin:'4px 0 0',display:'flex',alignItems:'center',gap:4}}>
+              ⚡ El cargo asigna automáticamente el rol: <strong>{cargos.find(c=>c.nombre===formUser.cargo)?.rol}</strong>
+            </p>
+          )}
           </F>
           <div style={{display:'flex',alignItems:'center',gap:8,paddingTop:18}}>
             <input type="checkbox" id="uActivo" checked={formUser.activo!==false} onChange={e=>setFormUser(p=>({...p,activo:e.target.checked}))} style={{accentColor:'#C9A84C'}}/>
@@ -13835,13 +14166,71 @@ const Config = () => {
 
     {tab==='cargos'&&<div className="card-p">
       <div className="gline"/>
-      <h3 className="sy" style={{color:'#fff',fontWeight:700,fontSize:14,marginBottom:14}}>Gestión de Cargos</h3>
-      <div style={{display:'flex',gap:8,marginBottom:12}}>
-        <input className="inp" placeholder="Nombre del cargo..." value={newItem} onChange={e=>setNewItem(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addItem('cargos',setCargos,cargos)}/>
-        <button className="btn btn-g btn-sm" onClick={()=>addItem('cargos',setCargos,cargos)}><Ico n="plus" s={13}/>Agregar</button>
+      <h3 className="sy" style={{color:'#fff',fontWeight:700,fontSize:14,marginBottom:4}}>Gestión de Cargos</h3>
+      <p style={{fontSize:11,color:'#64748b',marginBottom:14}}>
+        Cada cargo puede tener un rol asociado. Al asignar el cargo a un usuario, sus permisos se actualizan automáticamente.
+      </p>
+      {/* Agregar cargo con rol */}
+      <div style={{display:'flex',gap:8,marginBottom:12,flexWrap:'wrap'}}>
+        <input className="inp" style={{flex:'1 1 140px'}} placeholder="Nombre del cargo..." value={newItem} onChange={e=>setNewItem(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&(()=>{
+            if(!newItem.trim()) return;
+            const item={id:uid(),nombre:newItem.trim(),rol:newCargoRol||'consultor'};
+            const arr=[...cargos,item];
+            setCargos(arr); localStorage.setItem('ip_cargos',JSON.stringify(arr)); setNewItem('');
+            try{ DB.set('cargos',item); } catch(_){}
+            toast(`Cargo "${item.nombre}" creado con rol ${item.rol}`,'success');
+          })()}/>
+        <select className="inp" style={{flex:'0 0 130px'}}
+          value={newCargoRol||'consultor'} onChange={e=>setNewCargoRol(e.target.value)}>
+          {['administrador','gerente','coordinador','consultor','usuario'].map(r=>(
+            <option key={r} value={r}>{r.charAt(0).toUpperCase()+r.slice(1)}</option>
+          ))}
+        </select>
+        <button className="btn btn-g btn-sm" onClick={()=>{
+          if(!newItem.trim()) return;
+          const item={id:uid(),nombre:newItem.trim(),rol:newCargoRol||'consultor'};
+          const arr=[...cargos,item];
+          setCargos(arr); localStorage.setItem('ip_cargos',JSON.stringify(arr)); setNewItem('');
+          try{ DB.set('cargos',item); } catch(_){}
+          toast(`Cargo "${item.nombre}" creado con rol ${item.rol}`,'success');
+        }}><Ico n="plus" s={13}/>Agregar</button>
       </div>
-      {cargos.map(c=><div key={c.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 12px',background:'#0f1923',border:'1px solid #243447',borderRadius:8,marginBottom:6}}>
-        <span style={{color:'#fff',fontSize:13}}>{c.nombre}</span>
+      {/* Lista de cargos */}
+      {cargos.map(c=><div key={c.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',
+        padding:'8px 12px',background:'#0f1923',border:'1px solid #243447',borderRadius:8,marginBottom:6,gap:8}}>
+        <div style={{flex:1,minWidth:0}}>
+          <span style={{color:'#fff',fontSize:13,fontWeight:600}}>{c.nombre}</span>
+          {c.rol && <span style={{marginLeft:8,fontSize:10,padding:'1px 7px',borderRadius:99,
+            background:'rgba(201,168,76,.1)',color:'#C9A84C',border:'1px solid rgba(201,168,76,.25)',textTransform:'capitalize'}}>
+            {c.rol}
+          </span>}
+        </div>
+        {/* Cambiar rol del cargo */}
+        <select className="inp" style={{width:120,fontSize:11,padding:'3px 6px'}}
+          value={c.rol||'consultor'} onChange={async e=>{
+            const nuevoRol = e.target.value;
+            const cargoActualizado = {...c, rol: nuevoRol};
+            const arr = cargos.map(x=>x.id===c.id ? cargoActualizado : x);
+            setCargos(arr);
+            localStorage.setItem('ip_cargos', JSON.stringify(arr));
+            try{
+              // DB.set hace merge sobre el documento existente
+              await DB.set('cargos', cargoActualizado);
+              // FASE 3: Propagar automáticamente a usuarios con este cargo
+              const todosUsuarios = DB.get('usuarios');
+              for(const u of todosUsuarios.filter(x=>x.cargo===c.nombre)){
+                const permsDefault = ROL_PERMISOS[nuevoRol] || {};
+                const usuarioActualizado = {...u, rol: nuevoRol, permisos: permsDefault};
+                await DB.set('usuarios', usuarioActualizado);
+              }
+              toast(`Rol "${nuevoRol}" aplicado al cargo y usuarios asociados`,'success');
+            } catch(err){ console.warn('Cargo rol update:', err.message); }
+          }}>
+          {['administrador','gerente','coordinador','consultor','usuario'].map(r=>(
+            <option key={r} value={r}>{r.charAt(0).toUpperCase()+r.slice(1)}</option>
+          ))}
+        </select>
         <button onClick={()=>delItem('cargos',setCargos,cargos,c.id)} style={{background:'none',border:'none',cursor:'pointer',color:'#ef4444',padding:4}}><Ico n="trash" s={14}/></button>
       </div>)}
       {cargos.length===0&&<p style={{color:'#475569',fontSize:13}}>Sin cargos. Agregue los cargos de su organización.</p>}
@@ -14258,53 +14647,44 @@ const App = () => {
   useEffect(()=>{ window.__ipSetUser = setUser; return()=>{ window.__ipSetUser = null; }; },[setUser]);
 
   // Escuchar cambios de configuración (logo, empresa) para actualizar Sidebar en tiempo real
+  // + listener GLOBAL de notificaciones Chat (siempre activo, cualquier módulo)
+  const userRef = useRef(user);
+  useEffect(() => { userRef.current = user; }, [user]);
+
   useEffect(()=>{
     const onCfg = () => setCfgApp(JSON.parse(localStorage.getItem('ip_config')||'{}'));
     const onBackup = (e) => setBackup(e.detail);
-    const onChatBadge = (e) => setChatUnread(e.detail || 0);  // FASE 3: Escuchar badge de Chat
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // FIX CRÍTICO: Notificaciones GLOBALES (activas en TODOS los módulos)
-    // PROBLEMA ORIGINAL: listener en Chat component → solo funciona si Chat está abierto
-    // SOLUCIÓN: Listener en App component (SIEMPRE activo, independiente del módulo actual)
-    // ═══════════════════════════════════════════════════════════════════════════
+    const onChatBadge = (e) => setChatUnread(e.detail || 0);
+
+    // Notificaciones globales — ref garantiza acceso al user actual sin stale closure
     const handleNewMsg = (e) => {
       const {msgs: newMsgs} = e.detail;
-      if(!user?.id) return;
-      
-      // Notificar para CADA mensaje nuevo que no sea mío
+      const currentUser = userRef.current;
+      if(!currentUser?.id) return;
       newMsgs.forEach(m => {
-        if(m.autorId !== user?.id) {
-          console.log('🔔 NOTIFICACIÓN GLOBAL ACTIVA:', m.autorNombre, '→', m.texto.substring(0,40));
-          
-          // 1. Toast visual (en cualquier módulo)
+        if(m.autorId !== currentUser.id) {
           NotificationSvc.show('💬 Nuevo mensaje', {
             message: `${m.autorNombre}: ${m.texto.substring(0,60)}${m.texto.length > 60 ? '...' : ''}`,
-            type: 'info',
-            duration: 5000
+            type: 'info', duration: 5000
           });
-          
-          // 2. Sonido (en cualquier módulo)
           NotificationSvc.playSound();
-          
-          // 3. Marcar como no leído
-          ChatSvc.markAsRead(m.id || m._key, user.id);
+          ChatSvc.markAsRead(m.id || m._key, currentUser.id);
         }
       });
     };
-    
+
     window.addEventListener('ip-config-updated', onCfg);
     window.addEventListener('ip-backup-updated', onBackup);
     window.addEventListener('chat-unread-badge', onChatBadge);
-    window.addEventListener('ip-chat-new-messages', handleNewMsg);  // ← FIX: GLOBAL listener
-    
+    window.addEventListener('ip-chat-new-messages', handleNewMsg);
+
     return ()=>{
       window.removeEventListener('ip-config-updated', onCfg);
       window.removeEventListener('ip-backup-updated', onBackup);
       window.removeEventListener('chat-unread-badge', onChatBadge);
-      window.removeEventListener('ip-chat-new-messages', handleNewMsg);  // ← FIX: cleanup
+      window.removeEventListener('ip-chat-new-messages', handleNewMsg);
     };
-  },[user?.id]);
+  },[]);  // [] — se registra una sola vez; user llega via userRef
 
   // B7: Referencia del timer de inactividad
   const inactivityRef = useRef(null);
@@ -14456,17 +14836,24 @@ const App = () => {
           perfilNuevo.rol = _rolLocks[perfilNuevo.id];
           console.log('🔒 onSnapshot: rol bloqueado explícitamente a', perfilNuevo.rol, 'para', perfilNuevo.email);
         }
-        // Comparar permisos/rol actuales con los nuevos para detectar cambio real
-        const actualJSON = JSON.stringify({ permisos: user.permisos, rol: user.rol });
-        const nuevoJSON  = JSON.stringify({ permisos: perfilNuevo.permisos, rol: perfilNuevo.rol });
+        // FASE 2 FIX: Comparar el perfil completo (permisos + rol + cargo + activo)
+        // para detectar cualquier cambio que el admin haga sobre este usuario.
+        const actualJSON = JSON.stringify({ permisos: user.permisos, rol: user.rol, cargo: user.cargo, activo: user.activo });
+        const nuevoJSON  = JSON.stringify({ permisos: perfilNuevo.permisos, rol: perfilNuevo.rol, cargo: perfilNuevo.cargo, activo: perfilNuevo.activo });
         if(actualJSON !== nuevoJSON) {
-          // Permisos cambiaron — actualizar sesión y estado de React
+          // Perfil cambió — actualizar sesión y estado de React
           localStorage.setItem('ip_session', JSON.stringify(perfilNuevo));
           setUser(perfilNuevo);
-          // Notificar al usuario que sus permisos fueron actualizados (sólo si NO fue auto-corrección)
+          // Notificar al usuario con mensaje específico según qué cambió
           const toastFn = window.__ipToast;
-          if(toastFn && user.rol === perfilNuevo.rol) {
-            toastFn('Tus permisos de acceso han sido actualizados por el administrador.', 'info');
+          if(toastFn) {
+            if(user.rol !== perfilNuevo.rol) {
+              toastFn(`Tu rol ha sido actualizado a: ${perfilNuevo.rol}.`, 'info');
+            } else if(user.cargo !== perfilNuevo.cargo) {
+              toastFn(`Tu cargo ha sido actualizado a: ${perfilNuevo.cargo || 'sin cargo'}.`, 'info');
+            } else {
+              toastFn('Tus permisos de acceso han sido actualizados por el administrador.', 'info');
+            }
           }
         }
       }, () => {/* sin red: ignorar silenciosamente */});
