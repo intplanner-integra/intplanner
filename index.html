@@ -745,7 +745,7 @@ let _fbApp, _db, _rtdb, _auth, _authSecundario, FIREBASE_OK = false, RTDB_OK = f
 try { window._fbCfg = firebaseConfig; } catch(_){}
 try {
   _fbApp = firebase.initializeApp(firebaseConfig);
-  _db    = firebase.firestore();
+  _db    = firebase.firestore(firebase.app(), "intplannerbd");
   // CORRECCIÓN A: Eliminado el parche manual de _databaseId que corrompía
   // el estado interno del SDK Firestore 10.7.1 y causaba
   // "INTERNAL ASSERTION FAILED: Unexpected state" al cambiar de módulo.
@@ -15146,7 +15146,7 @@ const SyncQueue = {
     for(const item of queue) {
       try {
         if(typeof firebase !== 'undefined' && (window.FIREBASE_OK || typeof FIREBASE_OK !== 'undefined' && FIREBASE_OK)) {
-          const db = firebase.firestore();
+          const db = firebase.firestore(firebase.app(), "intplannerbd");
           if(item.op === 'set') {
             await db.collection(item.col).doc(item.data.id).set(item.data, {merge:true});
           } else if(item.op === 'del') {
