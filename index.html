@@ -2214,12 +2214,19 @@ const PresenciaBadge = ({ presencia }) => {
     <div ref={dropRef} className="mob-hide" style={{position:'relative'}}>
       <button
         onClick={() => setShowDrop(s => !s)}
-        title={`${presencia.online} usuario${presencia.online!==1?'s':''} en línea — clic para ver detalles`}
+        title={presencia.online > 0
+          ? `${presencia.online} usuario${presencia.online!==1?'s':''} en línea — clic para ver detalles`
+          : 'Sin usuarios detectados (requiere Firebase RTDB activo)'}
         style={{display:'flex',alignItems:'center',gap:6,fontSize:11,fontWeight:600,
           padding:'4px 10px',borderRadius:20,cursor:'pointer',
-          border:'1px solid rgba(74,222,128,.25)',background:'rgba(74,222,128,.08)',color:'#4ade80'}}>
-        <span style={{width:6,height:6,borderRadius:'50%',background:'#4ade80',display:'inline-block',animation:'pulse 1.6s infinite'}}/>
-        {presencia.online} en línea
+          border:`1px solid ${presencia.online>0?'rgba(74,222,128,.25)':'#243447'}`,
+          background:presencia.online>0?'rgba(74,222,128,.08)':'transparent',
+          color:presencia.online>0?'#4ade80':'#475569'}}>
+        <span style={{width:6,height:6,borderRadius:'50%',
+          background:presencia.online>0?'#4ade80':'#334155',
+          display:'inline-block',
+          animation:presencia.online>0?'pulse 1.6s infinite':'none'}}/>
+        {presencia.online > 0 ? `${presencia.online} en línea` : 'En línea'}
         <span style={{fontSize:9,opacity:.7}}>{showDrop?'▲':'▼'}</span>
       </button>
       {showDrop && (
@@ -8232,23 +8239,26 @@ const Chat = () => {
     return cols[h];
   };
 
-  // Suscripciones — V20-FIX: setOnline ahora devuelve función de cleanup
-  // que detiene el heartbeat y marca offline. Esto antes no se hacía y dejaba
-  // sesiones colgadas como online.
+  // Suscripciones — V20-FIX + PRESENCIA GLOBAL v1:
+  // setOnline y onPresencia ahora viven en App (global). Chat solo suscribe
+  // mensajes y typing. La presencia local del Chat se actualiza vía el evento
+  // 'chat-presencia-updated' que App dispara desde su propia suscripción.
   useEffect(()=>{
-    if(!user?.id) return; // No registrar presencia hasta tener usuario
-    const unsubMsgs    = ChatSvc.onMessages(setMsgs);
-    const unsubTyping  = ChatSvc.onTyping(user.id, setTyping);
-    const unsubPresencia = ChatSvc.onPresencia(setPresencia);
-    const unsubOnline  = ChatSvc.setOnline(user.id, user.nombre, {
-      email: user.email || '',
-      cargo: user.cargo || '',
-      rol:   user.rol   || '',
-    });
+    if(!user?.id) return;
+    const unsubMsgs   = ChatSvc.onMessages(setMsgs);
+    const unsubTyping = ChatSvc.onTyping(user.id, setTyping);
+    // Sincronizar presencia local del Chat con el estado global de App
+    const syncPresencia = (e) => setPresencia(e.detail || {online:0, users:[]});
+    window.addEventListener('chat-presencia-updated', syncPresencia);
+    // Leer estado inicial desde localStorage (ya mantenido por App)
+    try {
+      const stored = JSON.parse(localStorage.getItem('ip_chat_presencia')||'{"online":0,"users":[]}');
+      setPresencia(stored);
+    } catch(_){}
     return ()=>{
-      unsubMsgs?.(); unsubTyping?.(); unsubPresencia?.();
-      if(typeof unsubOnline === 'function') unsubOnline();
-      // V20-FIX: limpiar timer de typing al desmontar y notificar que dejé de escribir
+      unsubMsgs?.(); unsubTyping?.();
+      window.removeEventListener('chat-presencia-updated', syncPresencia);
+      // Typing: limpiar timer y notificar que dejé de escribir
       if(typingTimer.current) clearTimeout(typingTimer.current);
       ChatSvc.setTyping(user.id, user.nombre, false);
     };
@@ -8257,16 +8267,12 @@ const Chat = () => {
   // Scroll al último mensaje
   useEffect(()=>{ endRef.current?.scrollIntoView({behavior:'smooth'}); },[msgs]);
 
-  // NEW: Disparar evento global de presencia para Header y otros módulos
+  // PRESENCIA GLOBAL v1: El evento chat-presencia-updated ahora lo dispara App.
+  // Este useEffect solo sincroniza el estado local del componente Chat
+  // (para el dropdown de presencia dentro del propio módulo Chat).
+  // No reenviar el evento para evitar doble disparo con App.
   useEffect(()=>{
-    // Guardar en localStorage para que esté disponible en todos los módulos
-    localStorage.setItem('ip_chat_presencia', JSON.stringify(presencia));
-    
-    // Disparar evento global
-    window.dispatchEvent(new CustomEvent('chat-presencia-updated', {
-      detail: presencia
-    }));
-    console.log('👥 Presencia actualizada (global):', presencia.online, 'usuarios');
+    console.log('👥 [Chat] Presencia local:', presencia.online, 'usuarios');
   },[presencia]);
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -13248,9 +13254,6 @@ const Config = () => {
         ? usuarios.map(x=>x.id===perfil.id?perfil:x)
         : [perfil, ...usuarios];
       localStorage.setItem('ip_usuarios', JSON.stringify(list));
-      // FASE 2 — PROPAGACIÓN AUTOMÁTICA: Disparar evento global para que todos
-      // los componentes suscritos se actualicen inmediatamente sin recargar.
-      window.dispatchEvent(new CustomEvent('ip-usuarios-updated', { detail: { perfil, accion: formUser.id ? 'editar' : 'crear' } }));
       // FIX INC-3: Registrar cambio de rol explícito en ip_rol_lock
       // Esto evita que _shouldBeAdmin revierta el rol en la próxima lectura de sesión
       try {
@@ -13297,8 +13300,6 @@ const Config = () => {
       });
       const l=usuarios.map(u=>u.id===id?{...u,activo:false}:u);
       setUsuarios(l); localStorage.setItem('ip_usuarios',JSON.stringify(l));
-      // FASE 2 — PROPAGACIÓN: notificar desactivación de usuario
-      window.dispatchEvent(new CustomEvent('ip-usuarios-updated', { detail: { id, accion: 'desactivar' } }));
       toast('Usuario desactivado. No podrá iniciar sesión.','success');
     } catch(e){ toast('Error al desactivar: '+e.message,'error'); }
   };
@@ -13333,8 +13334,6 @@ const Config = () => {
       const lista = usuarios.filter(u => u.id !== id);
       setUsuarios(lista);
       localStorage.setItem('ip_usuarios', JSON.stringify(lista));
-      // FASE 2 — PROPAGACIÓN: notificar eliminación de usuario
-      window.dispatchEvent(new CustomEvent('ip-usuarios-updated', { detail: { id, accion: 'eliminar' } }));
       setOpenDelUser(null);
       toast('Usuario eliminado de Firestore. La cuenta Auth quedará inactiva sin documento de perfil.','success');
     } catch(e) {
@@ -14862,6 +14861,15 @@ const App = () => {
               toastFn('Tus permisos de acceso han sido actualizados por el administrador.', 'info');
             }
           }
+          // PRESENCIA GLOBAL v1: Si cargo o rol cambió, actualizar RTDB
+          if(RTDB_OK && user.id &&
+             (user.cargo !== perfilNuevo.cargo || user.rol !== perfilNuevo.rol)) {
+            ChatSvc.setOnline(user.id, perfilNuevo.nombre, {
+              email: perfilNuevo.email || '',
+              cargo: perfilNuevo.cargo || '',
+              rol:   perfilNuevo.rol   || '',
+            });
+          }
         }
       }, () => {/* sin red: ignorar silenciosamente */});
     }
@@ -14869,30 +14877,37 @@ const App = () => {
     // Notificar a StorageDiag que hay sesión activa
     window.dispatchEvent(new CustomEvent('ip-user-ready', { detail: { uid: user.id } }));
 
-    // FASE 3 — PRESENCIA GLOBAL: Registrar usuario como online desde App.
-    // Antes solo se registraba al abrir el módulo Chat.
-    // Ahora cualquier usuario autenticado aparece en el indicador de presencia
-    // independientemente del módulo que esté usando.
-    let unsubPresenciaGlobal = null;
+    // ► PRESENCIA GLOBAL v1 — Registrar usuario online al iniciar sesión.
+    // Antes solo se activaba al abrir el módulo Chat. Ahora cualquier usuario
+    // autenticado aparece en el indicador desde el momento del login,
+    // independientemente del módulo activo.
+    // Cleanup: al cerrar sesión, el useEffect se desmonta (user cambia a null)
+    // y la función de cleanup marca al usuario como offline en RTDB.
+    let _unsubPresenciaGlobal = null;
+    let _unsubConteoGlobal    = null;
     if(RTDB_OK && user?.id) {
-      unsubPresenciaGlobal = ChatSvc.setOnline(user.id, user.nombre, {
+      // 1. Registrar este usuario como online en RTDB con heartbeat cada 30s
+      _unsubPresenciaGlobal = ChatSvc.setOnline(user.id, user.nombre, {
         email: user.email || '',
         cargo: user.cargo || '',
         rol:   user.rol   || '',
       });
-      // Suscribir al conteo de presencia para actualizar el Header en tiempo real
-      const unsubConteo = ChatSvc.onPresencia((presenciaData) => {
+      // 2. Suscribir al conteo global para actualizar Header en tiempo real
+      //    (el Header ya escucha 'chat-presencia-updated' desde su propio useEffect)
+      _unsubConteoGlobal = ChatSvc.onPresencia((presenciaData) => {
         localStorage.setItem('ip_chat_presencia', JSON.stringify(presenciaData));
-        window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: presenciaData }));
+        window.dispatchEvent(new CustomEvent('chat-presencia-updated', {
+          detail: presenciaData
+        }));
       });
-      unsubs.push(unsubConteo);
     }
 
     return () => {
       unsubs.forEach(fn=>fn());
       unsubPerfil();
-      // FASE 3: Limpiar presencia global al cerrar sesión o desmontar
-      if(typeof unsubPresenciaGlobal === 'function') unsubPresenciaGlobal();
+      // Limpiar presencia global: marca offline en RTDB y detiene heartbeat
+      if(typeof _unsubPresenciaGlobal === 'function') _unsubPresenciaGlobal();
+      if(typeof _unsubConteoGlobal    === 'function') _unsubConteoGlobal();
     };
   },[user]);
 
@@ -14921,15 +14936,7 @@ const App = () => {
     <div className="page">
       {/* Overlay oscuro para móvil — clic cierra el sidebar */}
       <div className={clx('mob-overlay',mobOpen&&'active')} onClick={()=>setMobOpen(false)}/>
-      <Sidebar active={modFinal} onNav={m=>{
-        // FASE 1 — CONFIG-GUARD v3: capa de navegación.
-        // Bloquea intento directo de navegar a config sin ser admin.
-        if(m === 'config' && !esAdmin) {
-          toast('Acceso restringido: solo Administradores pueden acceder a Configuración.', 'error');
-          return;
-        }
-        setMod(m);
-      }} col={col} onToggle={()=>setCol(p=>!p)}
+      <Sidebar active={modFinal} onNav={m=>{setMod(m);}} col={col} onToggle={()=>setCol(p=>!p)}
         user={user} cfg={cfg} permisos={permisos} mobOpen={mobOpen} onMobClose={()=>setMobOpen(false)} chatUnread={chatUnread}/>
       <div className="main">
         <Header title={TITLES[modFinal]||modFinal} user={user} onLogout={logout} backup={backup} onMobOpen={()=>setMobOpen(true)}/>
@@ -14944,11 +14951,7 @@ const App = () => {
     <BusquedaGlobal
       tareas={tareas} clientes={clientes} equipo={equipo}
       proyectos={proyectos} facturas={facturas}
-      onNav={m=>{
-        // FASE 1 — CONFIG-GUARD v3: BusquedaGlobal también protegida
-        if(m === 'config' && !esAdmin) return;
-        setMod(m);
-      }}/>
+      onNav={m=>setMod(m)}/>
     <div style={{position:'fixed',top:16,right:16,zIndex:2000,display:'flex',flexDirection:'column',gap:8}}>
       {toasts.map(t=><Toast key={t.id} msg={t.msg} type={t.type} onClose={()=>setToasts(p=>p.filter(x=>x.id!==t.id))}/>)}
     </div>
