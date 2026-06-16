@@ -790,8 +790,13 @@ try {
   try {
     _rtdb   = firebase.database();
     RTDB_OK = true;
+    // Exponer en window para que React (Babel async) pueda leerlos
+    // sin depender del closure de módulo que puede capturar false
+    window._rtdb   = _rtdb;
+    window.RTDB_OK = true;
     console.log('✅ Realtime Database activo — Chat en tiempo real');
   } catch(e2) {
+    window.RTDB_OK = false;
     console.warn('ℹ️ RTDB no disponible — Chat usará localStorage:', e2.message);
   }
 } catch(e) {
@@ -2214,19 +2219,12 @@ const PresenciaBadge = ({ presencia }) => {
     <div ref={dropRef} className="mob-hide" style={{position:'relative'}}>
       <button
         onClick={() => setShowDrop(s => !s)}
-        title={presencia.online > 0
-          ? `${presencia.online} usuario${presencia.online!==1?'s':''} en línea — clic para ver detalles`
-          : 'Sin usuarios detectados (requiere Firebase RTDB activo)'}
+        title={`${presencia.online} usuario${presencia.online!==1?'s':''} en línea — clic para ver detalles`}
         style={{display:'flex',alignItems:'center',gap:6,fontSize:11,fontWeight:600,
           padding:'4px 10px',borderRadius:20,cursor:'pointer',
-          border:`1px solid ${presencia.online>0?'rgba(74,222,128,.25)':'#243447'}`,
-          background:presencia.online>0?'rgba(74,222,128,.08)':'transparent',
-          color:presencia.online>0?'#4ade80':'#475569'}}>
-        <span style={{width:6,height:6,borderRadius:'50%',
-          background:presencia.online>0?'#4ade80':'#334155',
-          display:'inline-block',
-          animation:presencia.online>0?'pulse 1.6s infinite':'none'}}/>
-        {presencia.online > 0 ? `${presencia.online} en línea` : 'En línea'}
+          border:'1px solid rgba(74,222,128,.25)',background:'rgba(74,222,128,.08)',color:'#4ade80'}}>
+        <span style={{width:6,height:6,borderRadius:'50%',background:'#4ade80',display:'inline-block',animation:'pulse 1.6s infinite'}}/>
+        {presencia.online} en línea
         <span style={{fontSize:9,opacity:.7}}>{showDrop?'▲':'▼'}</span>
       </button>
       {showDrop && (
@@ -7938,6 +7936,116 @@ const NotificationSvc = {
 window.NotificationSvc = NotificationSvc;
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════════════
+// PRESENCIA SVC — Servicio autónomo de usuarios en línea
+// Independiente del módulo Chat. Se activa al iniciar sesión.
+// CAUSA RAIZ 1: Timing - usa window.RTDB_OK (no closure)
+// CAUSA RAIZ 2: Closure - lee _rtdb desde window en tiempo de ejecución
+// CAUSA RAIZ 3: Evento sólo desde Chat - ahora independiente
+// ════════════════════════════════════════════════════════════════════════════════════
+const PresenciaSvc = {
+  PATH: 'chat/presencia',
+  _hbInterval:  null,
+  _tickInterval: null,
+  _retryTimer:  null,
+  _rtdbRef:     null,
+  _activo:      false,
+
+  // Lee RTDB desde window en tiempo de ejecucion (no closure)
+  _ok: () => !!(window.RTDB_OK && window._rtdb),
+
+  // Emitir evento global + persistir en localStorage
+  _emit: (data) => {
+    const p = data || { online: 0, users: [] };
+    try { localStorage.setItem('ip_chat_presencia', JSON.stringify(p)); } catch(_){}
+    window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: p }));
+  },
+
+  // Arrancar: registrar usuario online y suscribirse al conteo
+  // Con retry hasta 10 veces cada 500ms si RTDB aun no esta listo
+  iniciar: (perfil) => {
+    if(!perfil?.id) return;
+    PresenciaSvc.detener();
+    let intentos = 0;
+    const intentar = () => {
+      if(!PresenciaSvc._ok()) {
+        intentos++;
+        if(intentos >= 20) {
+          console.warn('PresenciaSvc: RTDB no disponible tras 10s');
+          PresenciaSvc._emit({ online: 0, users: [] });
+          return;
+        }
+        PresenciaSvc._retryTimer = setTimeout(intentar, 500);
+        return;
+      }
+      PresenciaSvc._arrancar(perfil);
+    };
+    intentar();
+  },
+
+  _arrancar: (perfil) => {
+    const rtdb = window._rtdb;
+    const horaConexion = Date.now();
+    const ref = rtdb.ref(PresenciaSvc.PATH + '/' + perfil.id);
+    const datos = {
+      nombre:       perfil.nombre || 'Usuario',
+      email:        perfil.email  || '',
+      cargo:        perfil.cargo  || '',
+      rol:          perfil.rol    || '',
+      horaConexion: horaConexion,
+      online:       true,
+      ts:           firebase.database.ServerValue.TIMESTAMP,
+    };
+    // Heartbeat cada 30s
+    const heartbeat = () => ref.set(datos).catch(() => {});
+    heartbeat();
+    ref.onDisconnect().update({ online: false, ts: firebase.database.ServerValue.TIMESTAMP });
+    PresenciaSvc._hbInterval = setInterval(heartbeat, 30000);
+
+    // Suscribirse al nodo global de presencia
+    let lastSnap = {};
+    const computar = () => {
+      const now = Date.now();
+      const users = Object.entries(lastSnap)
+        .filter(([,v]) => v && v.online === true)
+        .filter(([,v]) => !v.ts || (now - v.ts) < 90000)
+        .map(([id, v]) => ({
+          id,
+          nombre:       v.nombre       || 'Usuario',
+          email:        v.email        || '',
+          cargo:        v.cargo        || '',
+          rol:          v.rol          || '',
+          horaConexion: v.horaConexion || v.ts || now,
+          estado:       'Activo',
+        }));
+      PresenciaSvc._emit({ online: users.length, users });
+    };
+    PresenciaSvc._rtdbRef = rtdb.ref(PresenciaSvc.PATH);
+    PresenciaSvc._rtdbRef.on('value', snap => { lastSnap = snap.val() || {}; computar(); });
+    PresenciaSvc._tickInterval = setInterval(computar, 15000);
+    PresenciaSvc._activo = true;
+    console.log('🟢 PresenciaSvc activo:', perfil.nombre, '|', perfil.rol);
+  },
+
+  // Actualizar datos en RTDB cuando cambia cargo/rol del usuario
+  actualizar: (perfil) => {
+    if(!perfil?.id || !PresenciaSvc._ok()) return;
+    window._rtdb.ref(PresenciaSvc.PATH + '/' + perfil.id)
+      .update({ nombre: perfil.nombre||'Usuario', email: perfil.email||'', cargo: perfil.cargo||'', rol: perfil.rol||'' })
+      .catch(() => {});
+  },
+
+  // Detener: marcar offline y limpiar intervalos
+  detener: () => {
+    if(PresenciaSvc._retryTimer)  { clearTimeout(PresenciaSvc._retryTimer);   PresenciaSvc._retryTimer  = null; }
+    if(PresenciaSvc._hbInterval)  { clearInterval(PresenciaSvc._hbInterval);  PresenciaSvc._hbInterval  = null; }
+    if(PresenciaSvc._tickInterval){ clearInterval(PresenciaSvc._tickInterval); PresenciaSvc._tickInterval= null; }
+    if(PresenciaSvc._rtdbRef)     { PresenciaSvc._rtdbRef.off(); PresenciaSvc._rtdbRef = null; }
+    PresenciaSvc._activo = false;
+  },
+};
+window.PresenciaSvc = PresenciaSvc;
+
 const ChatSvc = {
   PATH_MSGS:    'chat/mensajes',
   PATH_TYPING:  'chat/escribiendo',
@@ -8239,26 +8347,23 @@ const Chat = () => {
     return cols[h];
   };
 
-  // Suscripciones — V20-FIX + PRESENCIA GLOBAL v1:
-  // setOnline y onPresencia ahora viven en App (global). Chat solo suscribe
-  // mensajes y typing. La presencia local del Chat se actualiza vía el evento
-  // 'chat-presencia-updated' que App dispara desde su propia suscripción.
+  // Suscripciones — V20-FIX: setOnline ahora devuelve función de cleanup
+  // que detiene el heartbeat y marca offline. Esto antes no se hacía y dejaba
+  // sesiones colgadas como online.
   useEffect(()=>{
-    if(!user?.id) return;
-    const unsubMsgs   = ChatSvc.onMessages(setMsgs);
-    const unsubTyping = ChatSvc.onTyping(user.id, setTyping);
-    // Sincronizar presencia local del Chat con el estado global de App
-    const syncPresencia = (e) => setPresencia(e.detail || {online:0, users:[]});
-    window.addEventListener('chat-presencia-updated', syncPresencia);
-    // Leer estado inicial desde localStorage (ya mantenido por App)
-    try {
-      const stored = JSON.parse(localStorage.getItem('ip_chat_presencia')||'{"online":0,"users":[]}');
-      setPresencia(stored);
-    } catch(_){}
+    if(!user?.id) return; // No registrar presencia hasta tener usuario
+    const unsubMsgs    = ChatSvc.onMessages(setMsgs);
+    const unsubTyping  = ChatSvc.onTyping(user.id, setTyping);
+    const unsubPresencia = ChatSvc.onPresencia(setPresencia);
+    const unsubOnline  = ChatSvc.setOnline(user.id, user.nombre, {
+      email: user.email || '',
+      cargo: user.cargo || '',
+      rol:   user.rol   || '',
+    });
     return ()=>{
-      unsubMsgs?.(); unsubTyping?.();
-      window.removeEventListener('chat-presencia-updated', syncPresencia);
-      // Typing: limpiar timer y notificar que dejé de escribir
+      unsubMsgs?.(); unsubTyping?.(); unsubPresencia?.();
+      if(typeof unsubOnline === 'function') unsubOnline();
+      // V20-FIX: limpiar timer de typing al desmontar y notificar que dejé de escribir
       if(typingTimer.current) clearTimeout(typingTimer.current);
       ChatSvc.setTyping(user.id, user.nombre, false);
     };
@@ -8267,12 +8372,16 @@ const Chat = () => {
   // Scroll al último mensaje
   useEffect(()=>{ endRef.current?.scrollIntoView({behavior:'smooth'}); },[msgs]);
 
-  // PRESENCIA GLOBAL v1: El evento chat-presencia-updated ahora lo dispara App.
-  // Este useEffect solo sincroniza el estado local del componente Chat
-  // (para el dropdown de presencia dentro del propio módulo Chat).
-  // No reenviar el evento para evitar doble disparo con App.
+  // NEW: Disparar evento global de presencia para Header y otros módulos
   useEffect(()=>{
-    console.log('👥 [Chat] Presencia local:', presencia.online, 'usuarios');
+    // Guardar en localStorage para que esté disponible en todos los módulos
+    localStorage.setItem('ip_chat_presencia', JSON.stringify(presencia));
+    
+    // Disparar evento global
+    window.dispatchEvent(new CustomEvent('chat-presencia-updated', {
+      detail: presencia
+    }));
+    console.log('👥 Presencia actualizada (global):', presencia.online, 'usuarios');
   },[presencia]);
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -14850,6 +14959,8 @@ const App = () => {
           // Perfil cambió — actualizar sesión y estado de React
           localStorage.setItem('ip_session', JSON.stringify(perfilNuevo));
           setUser(perfilNuevo);
+          // Actualizar datos en RTDB cuando cargo o rol cambia
+          if(window.PresenciaSvc) window.PresenciaSvc.actualizar(perfilNuevo);
           // Notificar al usuario con mensaje específico según qué cambió
           const toastFn = window.__ipToast;
           if(toastFn) {
@@ -14861,15 +14972,6 @@ const App = () => {
               toastFn('Tus permisos de acceso han sido actualizados por el administrador.', 'info');
             }
           }
-          // PRESENCIA GLOBAL v1: Si cargo o rol cambió, actualizar RTDB
-          if(RTDB_OK && user.id &&
-             (user.cargo !== perfilNuevo.cargo || user.rol !== perfilNuevo.rol)) {
-            ChatSvc.setOnline(user.id, perfilNuevo.nombre, {
-              email: perfilNuevo.email || '',
-              cargo: perfilNuevo.cargo || '',
-              rol:   perfilNuevo.rol   || '',
-            });
-          }
         }
       }, () => {/* sin red: ignorar silenciosamente */});
     }
@@ -14877,37 +14979,15 @@ const App = () => {
     // Notificar a StorageDiag que hay sesión activa
     window.dispatchEvent(new CustomEvent('ip-user-ready', { detail: { uid: user.id } }));
 
-    // ► PRESENCIA GLOBAL v1 — Registrar usuario online al iniciar sesión.
-    // Antes solo se activaba al abrir el módulo Chat. Ahora cualquier usuario
-    // autenticado aparece en el indicador desde el momento del login,
-    // independientemente del módulo activo.
-    // Cleanup: al cerrar sesión, el useEffect se desmonta (user cambia a null)
-    // y la función de cleanup marca al usuario como offline en RTDB.
-    let _unsubPresenciaGlobal = null;
-    let _unsubConteoGlobal    = null;
-    if(RTDB_OK && user?.id) {
-      // 1. Registrar este usuario como online en RTDB con heartbeat cada 30s
-      _unsubPresenciaGlobal = ChatSvc.setOnline(user.id, user.nombre, {
-        email: user.email || '',
-        cargo: user.cargo || '',
-        rol:   user.rol   || '',
-      });
-      // 2. Suscribir al conteo global para actualizar Header en tiempo real
-      //    (el Header ya escucha 'chat-presencia-updated' desde su propio useEffect)
-      _unsubConteoGlobal = ChatSvc.onPresencia((presenciaData) => {
-        localStorage.setItem('ip_chat_presencia', JSON.stringify(presenciaData));
-        window.dispatchEvent(new CustomEvent('chat-presencia-updated', {
-          detail: presenciaData
-        }));
-      });
-    }
+    // ► PRESENCIA SVC: Iniciar al login con retry automático
+    // Usa window.RTDB_OK (no closure) y reintenta si RTDB no está listo
+    if(window.PresenciaSvc) window.PresenciaSvc.iniciar(user);
 
     return () => {
       unsubs.forEach(fn=>fn());
       unsubPerfil();
-      // Limpiar presencia global: marca offline en RTDB y detiene heartbeat
-      if(typeof _unsubPresenciaGlobal === 'function') _unsubPresenciaGlobal();
-      if(typeof _unsubConteoGlobal    === 'function') _unsubConteoGlobal();
+      // Detener presencia al cerrar sesión
+      if(window.PresenciaSvc) window.PresenciaSvc.detener();
     };
   },[user]);
 
