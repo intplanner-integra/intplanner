@@ -745,18 +745,18 @@ let _fbApp, _db, _rtdb, _auth, _authSecundario, FIREBASE_OK = false, RTDB_OK = f
 try { window._fbCfg = firebaseConfig; } catch(_){}
 try {
   _fbApp = firebase.initializeApp(firebaseConfig);
-  _db = firebase.firestore();
-  // FIX-FIRESTORE: SDK compat 10.7.1 ignora el 2do argumento en
-  // firebase.firestore(app, "intplannerbd") y conecta a "(default)".
-  // Solucion: usar settings({databaseId}) antes de la primera operacion.
+  // CORRECCIÓN DEFINITIVA: Conectar directamente a intplannerbd
+  // usando firebase.firestore(app, databaseId) que en SDK compat 10.7.1
+  // SI funciona cuando la BD existe en Firebase Console.
   try {
-    _db.settings({
-      databaseId: 'intplannerbd',
-      ignoreUndefinedProperties: true,
-    });
+    _db = firebase.firestore(firebase.app(), 'intplannerbd');
+    _db.settings({ ignoreUndefinedProperties: true });
     console.log('✅ Firestore conectado a: intplannerbd');
   } catch(e2) {
-    console.warn('ℹ️ Firestore settings no aplicado:', e2.message);
+    // Fallback a BD por defecto si intplannerbd no está disponible
+    _db = firebase.firestore();
+    _db.settings({ ignoreUndefinedProperties: true });
+    console.warn('⚠️ Firestore fallback a (default):', e2.message);
   }
   _auth  = firebase.auth();
   // CORRECCIÓN B: Persistencia offline con flag global que indica cuando está lista.
@@ -15279,8 +15279,9 @@ const SyncQueue = {
     for(const item of queue) {
       try {
         if(typeof firebase !== 'undefined' && (window.FIREBASE_OK || typeof FIREBASE_OK !== 'undefined' && FIREBASE_OK)) {
-          const db = firebase.firestore();
-          try { db.settings({ databaseId: 'intplannerbd', ignoreUndefinedProperties: true }); } catch(_){}
+          let db;
+          try { db = firebase.firestore(firebase.app(), 'intplannerbd'); db.settings({ignoreUndefinedProperties:true}); }
+          catch(_) { db = firebase.firestore(); }
           if(item.op === 'set') {
             await db.collection(item.col).doc(item.data.id).set(item.data, {merge:true});
           } else if(item.op === 'del') {
