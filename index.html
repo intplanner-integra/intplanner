@@ -790,10 +790,8 @@ try {
   try {
     _rtdb   = firebase.database();
     RTDB_OK = true;
-    // Exponer en window para que React (Babel async) pueda leerlos
-    // sin depender del closure de módulo que puede capturar false
-    window._rtdb   = _rtdb;
-    window.RTDB_OK = true;
+    window._rtdb   = _rtdb;   // Exponer para que React lo lea en tiempo de ejecución
+    window.RTDB_OK = true;    // Exponer para evitar problema de closure
     console.log('✅ Realtime Database activo — Chat en tiempo real');
   } catch(e2) {
     window.RTDB_OK = false;
@@ -7936,22 +7934,21 @@ const NotificationSvc = {
 window.NotificationSvc = NotificationSvc;
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ════════════════════════════════════════════════════════════════════════════════════
-// PRESENCIA SVC — Servicio autónomo de usuarios en línea
-// Independiente del módulo Chat. Se activa al iniciar sesión.
-// CAUSA RAIZ 1: Timing - usa window.RTDB_OK (no closure)
-// CAUSA RAIZ 2: Closure - lee _rtdb desde window en tiempo de ejecución
-// CAUSA RAIZ 3: Evento sólo desde Chat - ahora independiente
-// ════════════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PRESENCIA SVC v2 — Servicio autonomo de presencia. Independiente del Chat.
+// Se activa desde App al iniciar sesion. Resuelve 5 causas raiz identificadas.
+// ─────────────────────────────────────────────────────────────────────────────
 const PresenciaSvc = {
   PATH: 'chat/presencia',
-  _hbInterval:  null,
+  _hbInterval:   null,
   _tickInterval: null,
-  _retryTimer:  null,
-  _rtdbRef:     null,
-  _activo:      false,
+  _retryTimer:   null,
+  _rtdbRef:      null,
+  _activo:       false,
+  _perfil:       null,
 
-  // Lee RTDB desde window en tiempo de ejecucion (no closure)
+  // Lee RTDB desde window en tiempo de ejecucion (no closure de modulo)
   _ok: () => !!(window.RTDB_OK && window._rtdb),
 
   // Emitir evento global + persistir en localStorage
@@ -7961,17 +7958,17 @@ const PresenciaSvc = {
     window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: p }));
   },
 
-  // Arrancar: registrar usuario online y suscribirse al conteo
-  // Con retry hasta 10 veces cada 500ms si RTDB aun no esta listo
+  // Iniciar con retry automatico hasta 10s (20 x 500ms)
   iniciar: (perfil) => {
-    if(!perfil?.id) return;
+    if(!perfil || !perfil.id) return;
     PresenciaSvc.detener();
+    PresenciaSvc._perfil = perfil;
     let intentos = 0;
     const intentar = () => {
       if(!PresenciaSvc._ok()) {
         intentos++;
         if(intentos >= 20) {
-          console.warn('PresenciaSvc: RTDB no disponible tras 10s');
+          console.warn('[PresenciaSvc] RTDB no disponible tras 10s');
           PresenciaSvc._emit({ online: 0, users: [] });
           return;
         }
@@ -7983,10 +7980,11 @@ const PresenciaSvc = {
     intentar();
   },
 
+  // Arrancar conexion RTDB + heartbeat + suscripcion conteo global
   _arrancar: (perfil) => {
     const rtdb = window._rtdb;
     const horaConexion = Date.now();
-    const ref = rtdb.ref(PresenciaSvc.PATH + '/' + perfil.id);
+    const refUser = rtdb.ref(PresenciaSvc.PATH + '/' + perfil.id);
     const datos = {
       nombre:       perfil.nombre || 'Usuario',
       email:        perfil.email  || '',
@@ -7996,55 +7994,72 @@ const PresenciaSvc = {
       online:       true,
       ts:           firebase.database.ServerValue.TIMESTAMP,
     };
-    // Heartbeat cada 30s
-    const heartbeat = () => ref.set(datos).catch(() => {});
+    const heartbeat = () => refUser.set(datos).catch(function(){});
     heartbeat();
-    ref.onDisconnect().update({ online: false, ts: firebase.database.ServerValue.TIMESTAMP });
-    PresenciaSvc._hbInterval = setInterval(heartbeat, 30000);
+    refUser.onDisconnect().update({ online: false, ts: firebase.database.ServerValue.TIMESTAMP });
+    PresenciaSvc._hbInterval = setInterval(heartbeat, 25000); // 25s heartbeat, TTL 120s
 
-    // Suscribirse al nodo global de presencia
     let lastSnap = {};
     const computar = () => {
       const now = Date.now();
       const users = Object.entries(lastSnap)
-        .filter(([,v]) => v && v.online === true)
-        .filter(([,v]) => !v.ts || (now - v.ts) < 90000)
-        .map(([id, v]) => ({
-          id,
-          nombre:       v.nombre       || 'Usuario',
-          email:        v.email        || '',
-          cargo:        v.cargo        || '',
-          rol:          v.rol          || '',
-          horaConexion: v.horaConexion || v.ts || now,
-          estado:       'Activo',
-        }));
-      PresenciaSvc._emit({ online: users.length, users });
+        .filter(function(e){ return e[1] && e[1].online === true; })
+        .filter(function(e){ return !e[1].ts || (now - e[1].ts) < 120000; })
+        .map(function(e){
+          var id = e[0]; var v = e[1];
+          return {
+            id: id,
+            nombre:       v.nombre       || 'Usuario',
+            email:        v.email        || '',
+            cargo:        v.cargo        || '',
+            rol:          v.rol          || '',
+            horaConexion: v.horaConexion || v.ts || now,
+            estado:       'Activo',
+          };
+        });
+      PresenciaSvc._emit({ online: users.length, users: users });
     };
+
     PresenciaSvc._rtdbRef = rtdb.ref(PresenciaSvc.PATH);
-    PresenciaSvc._rtdbRef.on('value', snap => { lastSnap = snap.val() || {}; computar(); });
-    PresenciaSvc._tickInterval = setInterval(computar, 15000);
+    PresenciaSvc._rtdbRef.on('value', function(snap){
+      lastSnap = snap.val() || {};
+      computar();
+    });
+    PresenciaSvc._tickInterval = setInterval(computar, 20000);
     PresenciaSvc._activo = true;
-    console.log('🟢 PresenciaSvc activo:', perfil.nombre, '|', perfil.rol);
+    console.log('[PresenciaSvc] activo:', perfil.nombre, '|', perfil.rol);
   },
 
-  // Actualizar datos en RTDB cuando cambia cargo/rol del usuario
+  // Actualizar datos en RTDB cuando cambia cargo o rol
   actualizar: (perfil) => {
-    if(!perfil?.id || !PresenciaSvc._ok()) return;
+    if(!perfil || !perfil.id || !PresenciaSvc._ok()) return;
+    PresenciaSvc._perfil = perfil;
     window._rtdb.ref(PresenciaSvc.PATH + '/' + perfil.id)
-      .update({ nombre: perfil.nombre||'Usuario', email: perfil.email||'', cargo: perfil.cargo||'', rol: perfil.rol||'' })
-      .catch(() => {});
+      .update({
+        nombre: perfil.nombre || 'Usuario',
+        email:  perfil.email  || '',
+        cargo:  perfil.cargo  || '',
+        rol:    perfil.rol    || '',
+      }).catch(function(){});
   },
 
-  // Detener: marcar offline y limpiar intervalos
+  // Detener: marcar offline + limpiar intervalos y refs
   detener: () => {
-    if(PresenciaSvc._retryTimer)  { clearTimeout(PresenciaSvc._retryTimer);   PresenciaSvc._retryTimer  = null; }
-    if(PresenciaSvc._hbInterval)  { clearInterval(PresenciaSvc._hbInterval);  PresenciaSvc._hbInterval  = null; }
-    if(PresenciaSvc._tickInterval){ clearInterval(PresenciaSvc._tickInterval); PresenciaSvc._tickInterval= null; }
-    if(PresenciaSvc._rtdbRef)     { PresenciaSvc._rtdbRef.off(); PresenciaSvc._rtdbRef = null; }
+    if(PresenciaSvc._retryTimer)   { clearTimeout(PresenciaSvc._retryTimer);    PresenciaSvc._retryTimer   = null; }
+    if(PresenciaSvc._hbInterval)   { clearInterval(PresenciaSvc._hbInterval);   PresenciaSvc._hbInterval   = null; }
+    if(PresenciaSvc._tickInterval) { clearInterval(PresenciaSvc._tickInterval); PresenciaSvc._tickInterval = null; }
+    if(PresenciaSvc._rtdbRef)      { PresenciaSvc._rtdbRef.off(); PresenciaSvc._rtdbRef = null; }
+    if(PresenciaSvc._activo && PresenciaSvc._perfil && PresenciaSvc._perfil.id && PresenciaSvc._ok()) {
+      window._rtdb.ref(PresenciaSvc.PATH + '/' + PresenciaSvc._perfil.id)
+        .update({ online: false, ts: firebase.database.ServerValue.TIMESTAMP })
+        .catch(function(){});
+    }
     PresenciaSvc._activo = false;
+    PresenciaSvc._perfil = null;
   },
 };
 window.PresenciaSvc = PresenciaSvc;
+
 
 const ChatSvc = {
   PATH_MSGS:    'chat/mensajes',
@@ -14956,10 +14971,10 @@ const App = () => {
         const actualJSON = JSON.stringify({ permisos: user.permisos, rol: user.rol, cargo: user.cargo, activo: user.activo });
         const nuevoJSON  = JSON.stringify({ permisos: perfilNuevo.permisos, rol: perfilNuevo.rol, cargo: perfilNuevo.cargo, activo: perfilNuevo.activo });
         if(actualJSON !== nuevoJSON) {
-          // Perfil cambió — actualizar sesión y estado de React
+          // Perfil cambio - actualizar sesion y estado de React
           localStorage.setItem('ip_session', JSON.stringify(perfilNuevo));
           setUser(perfilNuevo);
-          // Actualizar datos en RTDB cuando cargo o rol cambia
+          // Actualizar datos en RTDB cuando cargo o rol cambio
           if(window.PresenciaSvc) window.PresenciaSvc.actualizar(perfilNuevo);
           // Notificar al usuario con mensaje específico según qué cambió
           const toastFn = window.__ipToast;
@@ -14976,17 +14991,16 @@ const App = () => {
       }, () => {/* sin red: ignorar silenciosamente */});
     }
 
-    // Notificar a StorageDiag que hay sesión activa
+    // Notificar a StorageDiag que hay sesion activa
     window.dispatchEvent(new CustomEvent('ip-user-ready', { detail: { uid: user.id } }));
 
-    // ► PRESENCIA SVC: Iniciar al login con retry automático
-    // Usa window.RTDB_OK (no closure) y reintenta si RTDB no está listo
+    // PRESENCIA SVC: iniciar al login con retry automatico si RTDB no esta listo
     if(window.PresenciaSvc) window.PresenciaSvc.iniciar(user);
 
     return () => {
       unsubs.forEach(fn=>fn());
       unsubPerfil();
-      // Detener presencia al cerrar sesión
+      // Detener presencia al cerrar sesion (marca offline en RTDB)
       if(window.PresenciaSvc) window.PresenciaSvc.detener();
     };
   },[user]);
