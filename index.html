@@ -745,21 +745,16 @@ let _fbApp, _db, _rtdb, _auth, _authSecundario, FIREBASE_OK = false, RTDB_OK = f
 try { window._fbCfg = firebaseConfig; } catch(_){}
 try {
   _fbApp = firebase.initializeApp(firebaseConfig);
-  _db    = firebase.firestore(firebase.app(), "intplannerbd");
-  // CORRECCIÓN A: Eliminado el parche manual de _databaseId que corrompía
-  // el estado interno del SDK Firestore 10.7.1 y causaba
-  // "INTERNAL ASSERTION FAILED: Unexpected state" al cambiar de módulo.
-  // El SDK compat 10.7.1 acepta databaseId via settings() ANTES de la primera
-  // operación. Si el proyecto usa la BD por defecto, no se necesita configuración.
+  _db = firebase.firestore();
+  // FIX-FIRESTORE: SDK compat 10.7.1 ignora el 2do argumento en
+  // firebase.firestore(app, "intplannerbd") y conecta a "(default)".
+  // Solucion: usar settings({databaseId}) antes de la primera operacion.
   try {
-    // ROOT-FIX: Usar la base de datos Firestore por defecto del proyecto.
-    // 'intplannerbd' no existe en este proyecto — causaba que todos los
-    // perfiles de usuario y colecciones fueran a una BD inexistente,
-    // impidiendo que los usuarios registrados pudieran iniciar sesión.
-    if(typeof _db.settings === 'function') {
-      _db.settings({ ignoreUndefinedProperties: true });
-      console.log('✅ Firestore configurado: base de datos por defecto');
-    }
+    _db.settings({
+      databaseId: 'intplannerbd',
+      ignoreUndefinedProperties: true,
+    });
+    console.log('✅ Firestore conectado a: intplannerbd');
   } catch(e2) {
     console.warn('ℹ️ Firestore settings no aplicado:', e2.message);
   }
@@ -790,8 +785,8 @@ try {
   try {
     _rtdb   = firebase.database();
     RTDB_OK = true;
-    window._rtdb   = _rtdb;   // Exponer para que React lo lea en tiempo de ejecución
-    window.RTDB_OK = true;    // Exponer para evitar problema de closure
+    window._rtdb   = _rtdb;
+    window.RTDB_OK = true;
     console.log('✅ Realtime Database activo — Chat en tiempo real');
   } catch(e2) {
     window.RTDB_OK = false;
@@ -7934,7 +7929,7 @@ const NotificationSvc = {
 window.NotificationSvc = NotificationSvc;
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ─────────────────────────────────────────────────────────────────────────────
+// ------------------------------------------------------------------------------
 // ─────────────────────────────────────────────────────────────────────────────
 // PRESENCIA SVC v2 — Servicio autonomo de presencia. Independiente del Chat.
 // Se activa desde App al iniciar sesion. Resuelve 5 causas raiz identificadas.
@@ -14971,10 +14966,8 @@ const App = () => {
         const actualJSON = JSON.stringify({ permisos: user.permisos, rol: user.rol, cargo: user.cargo, activo: user.activo });
         const nuevoJSON  = JSON.stringify({ permisos: perfilNuevo.permisos, rol: perfilNuevo.rol, cargo: perfilNuevo.cargo, activo: perfilNuevo.activo });
         if(actualJSON !== nuevoJSON) {
-          // Perfil cambio - actualizar sesion y estado de React
           localStorage.setItem('ip_session', JSON.stringify(perfilNuevo));
           setUser(perfilNuevo);
-          // Actualizar datos en RTDB cuando cargo o rol cambio
           if(window.PresenciaSvc) window.PresenciaSvc.actualizar(perfilNuevo);
           // Notificar al usuario con mensaje específico según qué cambió
           const toastFn = window.__ipToast;
@@ -14994,13 +14987,12 @@ const App = () => {
     // Notificar a StorageDiag que hay sesion activa
     window.dispatchEvent(new CustomEvent('ip-user-ready', { detail: { uid: user.id } }));
 
-    // PRESENCIA SVC: iniciar al login con retry automatico si RTDB no esta listo
+    // PRESENCIA: iniciar al login con retry automatico
     if(window.PresenciaSvc) window.PresenciaSvc.iniciar(user);
 
     return () => {
       unsubs.forEach(fn=>fn());
       unsubPerfil();
-      // Detener presencia al cerrar sesion (marca offline en RTDB)
       if(window.PresenciaSvc) window.PresenciaSvc.detener();
     };
   },[user]);
@@ -15287,7 +15279,8 @@ const SyncQueue = {
     for(const item of queue) {
       try {
         if(typeof firebase !== 'undefined' && (window.FIREBASE_OK || typeof FIREBASE_OK !== 'undefined' && FIREBASE_OK)) {
-          const db = firebase.firestore(firebase.app(), "intplannerbd");
+          const db = firebase.firestore();
+          try { db.settings({ databaseId: 'intplannerbd', ignoreUndefinedProperties: true }); } catch(_){}
           if(item.op === 'set') {
             await db.collection(item.col).doc(item.data.id).set(item.data, {merge:true});
           } else if(item.op === 'del') {
