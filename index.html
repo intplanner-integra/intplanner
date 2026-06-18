@@ -748,28 +748,26 @@ try {
   // CORRECCIÓN DEFINITIVA: Conectar directamente a intplannerbd
   // usando firebase.firestore(app, databaseId) que en SDK compat 10.7.1
   // SI funciona cuando la BD existe en Firebase Console.
-  // FIX FINAL: NO llamar settings() despues del constructor.
-  // settings() despues de firestore(app, dbId) resetea el databaseId.
-  _db = firebase.firestore(firebase.app(), 'intplannerbd');
-  console.log('✅ Firestore: intplannerbd activo');
+  try {
+    _db = firebase.firestore(firebase.app(), 'intplannerbd');
+    _db.settings({ ignoreUndefinedProperties: true });
+    console.log('✅ Firestore conectado a: intplannerbd');
+  } catch(e2) {
+    // Fallback a BD por defecto si intplannerbd no está disponible
+    _db = firebase.firestore();
+    _db.settings({ ignoreUndefinedProperties: true });
+    console.warn('⚠️ Firestore fallback a (default):', e2.message);
+  }
   _auth  = firebase.auth();
   // CORRECCIÓN B: Persistencia offline con flag global que indica cuando está lista.
   // DB.sub espera a que _persistenceReady sea true antes de llamar onSnapshot,
   // evitando "Unexpected state" cuando onSnapshot llega antes de que la store
   // de persistencia termine de inicializarse.
-  window._persistenceReady = false;
-  _db.enablePersistence({synchronizeTabs:true})
-    .then(()=>{
-      window._persistenceReady = true;
-      console.log('✅ Firestore persistence habilitada');
-    })
-    .catch(err=>{
-      // En cualquier error, marcar como listo para no bloquear la app
-      window._persistenceReady = true;
-      if(err.code==='failed-precondition') console.warn('Firestore persistence: múltiples tabs activas — continuando sin cache offline');
-      else if(err.code==='unimplemented') console.warn('Firestore persistence: navegador no soportado — modo online');
-      else console.warn('Firestore persistence error:', err.message);
-    });
+  // SOLUCION DEFINITIVA: enablePersistence DESHABILITADO para intplannerbd.
+  // SDK compat 10.7.1 enablePersistence() solo funciona con la BD '(default)'.
+  // Con bases de datos con nombre, falla internamente y bloquea onSnapshot.
+  // Modo online directo: onSnapshot lee de intplannerbd en tiempo real.
+  window._persistenceReady = true; // Listo inmediatamente
   // App secundaria para crear usuarios sin cerrar sesión del admin
   _authSecundario = firebase.initializeApp(firebaseConfig, 'secundario').auth();
   FIREBASE_OK = true;
