@@ -85,19 +85,19 @@
      Si el CDN es comprometido, el navegador rechaza el script que no coincida.
      NOTA: gstatic.com (Firebase) no expone hashes SRI oficiales; se usa crossorigin
      para activar CORS y preparar la infraestructura cuando cambien a SRI. -->
-<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"
+<script src="https://www.gstatic.com/firebasejs/12.15.0/firebase-app-compat.js"
         crossorigin="anonymous"></script>
-<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"
+<script src="https://www.gstatic.com/firebasejs/12.15.0/firebase-auth-compat.js"
         crossorigin="anonymous"></script>
-<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"
+<script src="https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore-compat.js"
         crossorigin="anonymous"></script>
-<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"
+<script src="https://www.gstatic.com/firebasejs/12.15.0/firebase-storage-compat.js"
         crossorigin="anonymous"></script>
 <!-- E-03 FIX: Firebase RTDB SDK — faltaba en el head y se usaba firebase.database()
      en el código para el módulo de Chat en tiempo real. Su ausencia causaba
      TypeError: firebase.database is not a function al inicializar Firebase,
      bloqueando la inicialización completa de la app. -->
-<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"
+<script src="https://www.gstatic.com/firebasejs/12.15.0/firebase-database-compat.js"
         crossorigin="anonymous"></script>
 <!-- React — crítico: base del render. 
      E-01 FIX: Pinado a versión exacta 18.3.1 (no @18 alias) para garantizar
@@ -742,40 +742,52 @@ let _fbApp, _db, _rtdb, _auth, _authSecundario, FIREBASE_OK = false, RTDB_OK = f
 try { window._fbCfg = firebaseConfig; } catch(_){}
 try {
   _fbApp = firebase.initializeApp(firebaseConfig);
-  _db    = firebase.firestore();
-  // CORRECCIÓN A: Eliminado el parche manual de _databaseId que corrompía
-  // el estado interno del SDK Firestore 10.7.1 y causaba
-  // "INTERNAL ASSERTION FAILED: Unexpected state" al cambiar de módulo.
-  // El SDK compat 10.7.1 acepta databaseId via settings() ANTES de la primera
-  // operación. Si el proyecto usa la BD por defecto, no se necesita configuración.
+  // BD (default): es la única que el SDK compat alcanza de forma fiable. La capa compat
+  // NO sabe apuntar a bases con nombre (intplannerbd), en ninguna versión: el argumento
+  // se ignora y siempre cae en (default). Los datos de intplannerbd se migran a (default)
+  // con gcloud export/import una sola vez; a partir de ahí esta es la fuente única.
+  _db = firebase.firestore();
   try {
-    // Usar la API oficial settings() — solo si el método existe y no hay ops pendientes
+    // merge:true evita el warning "You are overriding the original host" al fusionar
+    // con la configuración existente en vez de reemplazarla por completo.
     if(typeof _db.settings === 'function') {
-      _db.settings({ databaseId: 'intplannerbd', ignoreUndefinedProperties: true });
-      console.log('✅ Firestore configurado: intplannerbd (via settings)');
+      _db.settings({ ignoreUndefinedProperties: true, merge: true });
     }
   } catch(e2) {
-    // settings() falla si ya hay operaciones activas — continuar con BD default
+    // settings() falla si ya hay operaciones activas — continuar igual
     console.warn('ℹ️ Firestore settings no aplicado (operaciones activas):', e2.message);
   }
+  // Exponer la instancia para que TODO el código use exactamente la misma.
+  try { window._db = _db; } catch(_){}
+  // Diagnóstico: confirma en consola a qué BD quedó conectado (debe decir '(default)').
+  try { console.log('✅ Firestore configurado — BD activa:', _db?._databaseId?.database || '(default)'); }
+  catch(_) { console.log('✅ Firestore configurado: (default)'); }
   _auth  = firebase.auth();
   // CORRECCIÓN B: Persistencia offline con flag global que indica cuando está lista.
   // DB.sub espera a que _persistenceReady sea true antes de llamar onSnapshot,
   // evitando "Unexpected state" cuando onSnapshot llega antes de que la store
   // de persistencia termine de inicializarse.
   window._persistenceReady = false;
-  _db.enablePersistence({synchronizeTabs:true})
-    .then(()=>{
-      window._persistenceReady = true;
-      console.log('✅ Firestore persistence habilitada');
-    })
-    .catch(err=>{
-      // En cualquier error, marcar como listo para no bloquear la app
-      window._persistenceReady = true;
-      if(err.code==='failed-precondition') console.warn('Firestore persistence: múltiples tabs activas — continuando sin cache offline');
-      else if(err.code==='unimplemented') console.warn('Firestore persistence: navegador no soportado — modo online');
-      else console.warn('Firestore persistence error:', err.message);
-    });
+  // Blindaje por cambio de versión del SDK: si enablePersistence no existiera o cambiara,
+  // no se rompe el arranque — se marca listo y la app sigue (su cache localStorage propio
+  // mantiene el modo offline). enablePersistence sigue disponible en compat 12.x (deprecado).
+  if(typeof _db.enablePersistence === 'function') {
+    _db.enablePersistence({synchronizeTabs:true})
+      .then(()=>{
+        window._persistenceReady = true;
+        console.log('✅ Firestore persistence habilitada');
+      })
+      .catch(err=>{
+        // En cualquier error, marcar como listo para no bloquear la app
+        window._persistenceReady = true;
+        if(err.code==='failed-precondition') console.warn('Firestore persistence: múltiples tabs activas — continuando sin cache offline');
+        else if(err.code==='unimplemented') console.warn('Firestore persistence: navegador no soportado — modo online');
+        else console.warn('Firestore persistence error:', err.message);
+      });
+  } else {
+    window._persistenceReady = true;
+    console.warn('ℹ️ enablePersistence no disponible en esta versión del SDK — modo online (cache local propio activo)');
+  }
   // App secundaria para crear usuarios sin cerrar sesión del admin
   _authSecundario = firebase.initializeApp(firebaseConfig, 'secundario').auth();
   FIREBASE_OK = true;
@@ -14368,7 +14380,8 @@ const SyncQueue = {
     for(const item of queue) {
       try {
         if(typeof firebase !== 'undefined' && (window.FIREBASE_OK || typeof FIREBASE_OK !== 'undefined' && FIREBASE_OK)) {
-          const db = firebase.firestore();
+          // Reutilizar la MISMA instancia (BD default) — coherencia con DB.set/DB.del.
+          const db = window._db || firebase.firestore();
           if(item.op === 'set') {
             await db.collection(item.col).doc(item.data.id).set(item.data, {merge:true});
           } else if(item.op === 'del') {
