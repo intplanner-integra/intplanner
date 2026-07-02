@@ -7991,7 +7991,7 @@ const PresenciaSvc = {
       const now = Date.now();
       const users = Object.entries(lastSnap)
         .filter(function(e){ return e[1] && e[1].online === true; })
-        .filter(function(e){ return !e[1].ts || (now - e[1].ts) < 120000; })
+        .filter(function(e){ return !e[1].ts || Math.abs(now - e[1].ts) < 300000; })
         .map(function(e){
           var id = e[0]; var v = e[1];
           return {
@@ -14953,23 +14953,27 @@ const App = () => {
           perfilNuevo.rol = _rolLocks[perfilNuevo.id];
           console.log('🔒 onSnapshot: rol bloqueado explícitamente a', perfilNuevo.rol, 'para', perfilNuevo.email);
         }
-        // FASE 2 FIX: Comparar el perfil completo (permisos + rol + cargo + activo)
-        // para detectar cualquier cambio que el admin haga sobre este usuario.
-        const actualJSON = JSON.stringify({ permisos: user.permisos, rol: user.rol, cargo: user.cargo, activo: user.activo });
-        const nuevoJSON  = JSON.stringify({ permisos: perfilNuevo.permisos, rol: perfilNuevo.rol, cargo: perfilNuevo.cargo, activo: perfilNuevo.activo });
-        if(actualJSON !== nuevoJSON) {
+        // FIX-TOAST: Comparacion robusta con keys ordenadas + debounce 5s
+        const _sortKeys = (obj) => JSON.stringify(
+          Object.keys(obj||{}).sort().reduce((r,k)=>{r[k]=(obj||{})[k];return r;},{}));
+        const _rolCambio      = user.rol    !== perfilNuevo.rol;
+        const _cargoCambio    = user.cargo  !== perfilNuevo.cargo;
+        const _activoCambio   = user.activo !== perfilNuevo.activo;
+        const _permisosCambio = _sortKeys(user.permisos) !== _sortKeys(perfilNuevo.permisos);
+        const _hayCambio = _rolCambio || _cargoCambio || _activoCambio || _permisosCambio;
+        if(_hayCambio) {
           localStorage.setItem('ip_session', JSON.stringify(perfilNuevo));
           setUser(perfilNuevo);
           if(window.PresenciaSvc) window.PresenciaSvc.actualizar(perfilNuevo);
-          // Notificar al usuario con mensaje específico según qué cambió
-          const toastFn = window.__ipToast;
-          if(toastFn) {
-            if(user.rol !== perfilNuevo.rol) {
-              toastFn(`Tu rol ha sido actualizado a: ${perfilNuevo.rol}.`, 'info');
-            } else if(user.cargo !== perfilNuevo.cargo) {
-              toastFn(`Tu cargo ha sido actualizado a: ${perfilNuevo.cargo || 'sin cargo'}.`, 'info');
-            } else {
-              toastFn('Tus permisos de acceso han sido actualizados por el administrador.', 'info');
+          // Debounce 5s: evita multiples toasts en snapshots rapidos consecutivos
+          const _ahora = Date.now();
+          if(_ahora - (window._lastPermToast||0) > 5000) {
+            window._lastPermToast = _ahora;
+            const toastFn = window.__ipToast;
+            if(toastFn) {
+              if(_rolCambio)         toastFn(`Tu rol ha sido actualizado a: ${perfilNuevo.rol}.`, 'info');
+              else if(_cargoCambio)  toastFn(`Tu cargo ha sido actualizado a: ${perfilNuevo.cargo||'sin cargo'}.`, 'info');
+              else if(_permisosCambio) toastFn('Tus permisos han sido actualizados.', 'info');
             }
           }
         }
@@ -14980,7 +14984,20 @@ const App = () => {
     window.dispatchEvent(new CustomEvent('ip-user-ready', { detail: { uid: user.id } }));
 
     // PRESENCIA: iniciar al login con retry automatico
-    if(window.PresenciaSvc) window.PresenciaSvc.iniciar(user);
+    if(window.PresenciaSvc) {
+      window.PresenciaSvc.iniciar(user);
+      // FIX-PRESENCIA: Emitir estado inicial inmediatamente al login
+      // El indicador muestra al usuario actual desde el primer instante
+      // sin esperar a que RTDB confirme la conexion
+      const _presInit = {
+        online: 1,
+        users: [{ id: user.id, nombre: user.nombre||'Usuario',
+          email: user.email||'', cargo: user.cargo||'',
+          rol: user.rol||'', horaConexion: Date.now(), estado: 'Activo' }]
+      };
+      try { localStorage.setItem('ip_chat_presencia', JSON.stringify(_presInit)); } catch(_){}
+      window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: _presInit }));
+    }
 
     return () => {
       unsubs.forEach(fn=>fn());
