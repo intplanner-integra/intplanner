@@ -7752,7 +7752,7 @@ const ChatSvc = {
     const compute = () => {
       const others = Object.entries(lastData)
         .filter(([k])=>k!==myId)
-        .filter(([,v])=>v && v.ts && (Date.now() - v.ts) < 6000) // expirar 6s
+        .filter(([,v])=>v && (!v.ts || Math.abs(Date.now() - v.ts) < 300000)) // TTL 5min
         .map(([,v])=>v.nombre || 'Alguien');
       cb(others);
     };
@@ -14102,23 +14102,41 @@ const App = () => {
           console.log('🔒 onSnapshot: rol bloqueado explícitamente a', perfilNuevo.rol, 'para', perfilNuevo.email);
         }
         // Comparar permisos/rol actuales con los nuevos para detectar cambio real
-        const actualJSON = JSON.stringify({ permisos: user.permisos, rol: user.rol });
-        const nuevoJSON  = JSON.stringify({ permisos: perfilNuevo.permisos, rol: perfilNuevo.rol });
-        if(actualJSON !== nuevoJSON) {
-          // Permisos cambiaron — actualizar sesión y estado de React
+        // FIX-TOAST: Comparacion robusta + debounce 5s
+        const _sortKeys = (obj) => JSON.stringify(
+          Object.keys(obj||{}).sort().reduce((r,k)=>{r[k]=(obj||{})[k];return r;},{}));
+        const _rolCambio      = user.rol !== perfilNuevo.rol;
+        const _permisosCambio = _sortKeys(user.permisos) !== _sortKeys(perfilNuevo.permisos);
+        if(_rolCambio || _permisosCambio) {
           localStorage.setItem('ip_session', JSON.stringify(perfilNuevo));
           setUser(perfilNuevo);
-          // Notificar al usuario que sus permisos fueron actualizados (sólo si NO fue auto-corrección)
-          const toastFn = window.__ipToast;
-          if(toastFn && user.rol === perfilNuevo.rol) {
-            toastFn('Tus permisos de acceso han sido actualizados por el administrador.', 'info');
+          const _ahora = Date.now();
+          if(_ahora - (window._lastPermToast||0) > 5000) {
+            window._lastPermToast = _ahora;
+            const toastFn = window.__ipToast;
+            if(toastFn) {
+              if(_rolCambio) toastFn(`Tu rol ha sido actualizado a: ${perfilNuevo.rol}.`, 'info');
+              else toastFn('Tus permisos han sido actualizados.', 'info');
+            }
           }
         }
       }, () => {/* sin red: ignorar silenciosamente */});
     }
 
-    // Notificar a StorageDiag que hay sesión activa
+    // Notificar a StorageDiag que hay sesion activa
     window.dispatchEvent(new CustomEvent('ip-user-ready', { detail: { uid: user.id } }));
+
+    // FIX-PRESENCIA: Emitir estado inicial inmediatamente al login
+    // El indicador muestra al usuario actual desde el primer instante
+    const _presInit = {
+      online: 1,
+      users: [{ id: user.id, nombre: user.nombre||'Usuario',
+        email: user.email||'', cargo: user.cargo||'',
+        rol: user.rol||'', horaConexion: Date.now(), estado: 'Activo' }]
+    };
+    try { localStorage.setItem('ip_chat_presencia', JSON.stringify(_presInit)); } catch(_){}
+    window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: _presInit }));
+
     return () => { unsubs.forEach(fn=>fn()); unsubPerfil(); };
   },[user]);
 
