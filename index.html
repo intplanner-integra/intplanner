@@ -2,6 +2,12 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8"/>
+<!-- FIX-AUTO-UPDATE: Evitar que el navegador sirva HTML cacheado obsoleto.
+     Combinado con el Service Worker network-first, garantiza que cada carga
+     obtenga la última versión desplegada en GitHub Pages. -->
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+<meta http-equiv="Pragma" content="no-cache"/>
+<meta http-equiv="Expires" content="0"/>
 <meta http-equiv="x-dns-prefetch-control" content="on"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
 <meta name="mobile-web-app-capable" content="yes"/>
@@ -13284,25 +13290,82 @@ const Config = () => {
 
       // FIX-RESTORE-ROOT: Marcar timestamp de restauración para que DB.sub
       // NO descarte los datos locales cuando Firestore responda con datos viejos/vacíos.
-      // Sin esta marca, _isLocalPending() retorna false para datos restaurados
-      // (porque no pasaron por DB.set()) y onSnapshot los sobreescribe.
       try { localStorage.setItem('ip_restore_ts', String(Date.now())); } catch(_){}
 
-      const msgExtra = errores.length > 0 ? ` (${errores.join(',')} con error de cuota)` : '';
-      toast(`Backup restaurado: ${total} registros${msgExtra}. Recargando...`, 'success');
+      // ══════════════════════════════════════════════════════════════════
+      // FIX-ARQUITECTÓNICO: Subir a Firebase AHORA, ANTES de recargar.
+      // El usuario está autenticado (acaba de hacer clic en Restaurar),
+      // así que _auth.currentUser está garantizado. Subir aquí elimina
+      // la dependencia del frágil proceso post-reload que fallaba cuando
+      // auth no estaba lista a los 5s tras el reload.
+      // ══════════════════════════════════════════════════════════════════
+      if(FIREBASE_OK && _auth?.currentUser && navigator.onLine) {
+        toast('Sincronizando con Firebase (' + total + ' registros)...', 'info');
+        const colsConDatos = COLS.filter(c => Array.isArray(data[c]) && data[c].length > 0);
+        let synced = 0, syncErrors = 0;
 
-      // PASO 2: Sincronizar en Firebase en segundo plano (batch para velocidad)
-      // FIX-RESTORE-ROOT: La sincronización se hace DESPUÉS del reload.
-      // El flag ip_restore_ts protege los datos locales durante 120s,
-      // y al recargar, el useEffect de App relanza doFirebaseSync automáticamente
-      // vía ip_restore_pending. Esto evita que el reload interrumpa la subida.
-      try { localStorage.setItem('ip_restore_pending', JSON.stringify({
-        cols: COLS.filter(c => Array.isArray(data[c]) && data[c].length > 0),
-        ts: Date.now()
-      })); } catch(_){}
+        for(const c of colsConDatos) {
+          let arr = data[c];
+          if(c === 'equipo')   arr = limpiarFotos(arr);
+          if(c === 'tareas')   arr = limpiarSoporte(arr);
+          if(c === 'clientes') arr = limpiarLogos(arr);
 
-      // PASO 3: Recargar tras 1.5s (más rápido porque ya no esperamos sync)
-      setTimeout(() => window.location.reload(), 1500);
+          const BATCH_SIZE = 400;
+          for(let i = 0; i < arr.length; i += BATCH_SIZE) {
+            const batch = _db.batch();
+            const slice = arr.slice(i, i + BATCH_SIZE);
+            for(const doc of slice) {
+              if(!doc || !doc.id) continue;
+              const clean = {...doc};
+              // Limpiar TODOS los Timestamps serializados {seconds,nanoseconds}
+              for(const [key, val] of Object.entries(clean)) {
+                if(val && typeof val === 'object' && !Array.isArray(val)
+                   && val.seconds !== undefined && val.nanoseconds !== undefined) {
+                  clean[key] = firebase.firestore.FieldValue.serverTimestamp();
+                }
+              }
+              // Limpiar base64 pesados (no van a Firestore)
+              if(c === 'equipo' && clean.foto && (clean.foto.startsWith('data:') || clean.foto === '__local_foto__')) clean.foto = '';
+              if(c === 'clientes' && clean.logo && (clean.logo.startsWith('data:') || clean.logo === '__local__')) clean.logo = '';
+              if(c === 'tareas' && clean.soporteCierre) {
+                if(typeof clean.soporteCierre === 'string' && clean.soporteCierre.length > 10000) clean.soporteCierre = '';
+                if(Array.isArray(clean.soporteCierre)) clean.soporteCierre = clean.soporteCierre.map(a => (a && a.data && a.data.length > 10000) ? {...a, data:'', _stripped:true} : a);
+              }
+              batch.set(_db.collection(c).doc(doc.id), clean, {merge:true});
+            }
+            try {
+              await batch.commit();
+              synced += slice.length;
+            } catch(e) {
+              console.warn('Restore sync error en', c, ':', e.message);
+              syncErrors += slice.length;
+              for(const doc of slice) {
+                if(doc?.id && window.OfflineQueue) window.OfflineQueue.push(c, doc, 'set');
+              }
+            }
+          }
+        }
+
+        console.log('✅ Restore→Firebase:', synced, 'OK,', syncErrors, 'errores');
+        if(syncErrors === 0) {
+          toast(`Backup restaurado y sincronizado: ${synced} registros. Todos los usuarios verán los cambios. Recargando...`, 'success');
+        } else {
+          toast(`Restaurado: ${synced} sincronizados, ${syncErrors} en cola de reintento. Recargando...`, 'warning');
+          // Dejar marca para reintento post-reload solo de lo que falló
+          try { localStorage.setItem('ip_restore_pending', JSON.stringify({ cols: colsConDatos, ts: Date.now() })); } catch(_){}
+        }
+      } else {
+        // Sin Firebase/auth/red: dejar marca para sync post-reload
+        const msgExtra = errores.length > 0 ? ` (${errores.join(',')} con error de cuota)` : '';
+        toast(`Backup restaurado localmente: ${total} registros${msgExtra}. Se sincronizará al reconectar. Recargando...`, 'warning');
+        try { localStorage.setItem('ip_restore_pending', JSON.stringify({
+          cols: COLS.filter(c => Array.isArray(data[c]) && data[c].length > 0),
+          ts: Date.now()
+        })); } catch(_){}
+      }
+
+      // PASO 3: Recargar tras 2s (ya con datos en Firebase)
+      setTimeout(() => window.location.reload(), 2000);
 
     } catch(e) {
       console.error('restaurarBackup error:', e);
@@ -14542,13 +14605,35 @@ const App = () => {
     // Se usa un ref para evitar recrear la suscripción si user.id no cambió.
     if(RTDB_OK && user.id && !window._ipPresenciaActiva) {
       window._ipPresenciaActiva = user.id;
+      // FIX-PRESENCIA-INDICADOR: Emitir usuario actual INMEDIATAMENTE (optimista)
+      // para que el indicador muestre "1 en línea" sin esperar el primer snapshot RTDB.
+      // El snapshot real de onPresencia luego actualiza con el conteo completo.
+      const _presInit = { online:1, users:[{
+        id:user.id, nombre:user.nombre||'Usuario', email:user.email||'',
+        cargo:user.cargo||'', rol:user.rol||'', horaConexion:Date.now(), estado:'Activo'
+      }]};
+      try { localStorage.setItem('ip_chat_presencia', JSON.stringify(_presInit)); } catch(_){}
+      window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: _presInit }));
+
       window._unsubOnlineGlobal = ChatSvc.setOnline(user.id, user.nombre, {
         email: user.email||'', cargo: user.cargo||'',
         rol: user.rol||'', horaConexion: Date.now(),
       });
       window._unsubPresGlobal = ChatSvc.onPresencia((pres) => {
-        try { localStorage.setItem('ip_chat_presencia', JSON.stringify(pres)); } catch(_){}
-        window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: pres }));
+        // FIX-PRESENCIA-INDICADOR: Garantizar que el usuario actual SIEMPRE aparezca
+        // en la lista, aunque el snapshot RTDB aún no lo incluya (latencia de escritura).
+        let finalPres = pres;
+        if(pres && Array.isArray(pres.users) && !pres.users.some(u => u.id === user.id)) {
+          finalPres = {
+            online: (pres.online||0) + 1,
+            users: [...pres.users, {
+              id:user.id, nombre:user.nombre||'Usuario', email:user.email||'',
+              cargo:user.cargo||'', rol:user.rol||'', horaConexion:Date.now(), estado:'Activo'
+            }]
+          };
+        }
+        try { localStorage.setItem('ip_chat_presencia', JSON.stringify(finalPres)); } catch(_){}
+        window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: finalPres }));
       });
     } else if(!RTDB_OK) {
       // Sin RTDB: emitir presencia local para que el indicador muestre al menos el usuario actual
@@ -14632,29 +14717,49 @@ ReactDOM.createRoot(document.getElementById('root')).render(
 <!-- ── BLOQUE 1: MODO OFFLINE COMPLETO ───────────────────────── -->
 <script>
 // ── SERVICE WORKER — registro inline ──────────────────────────
+// FIX-AUTO-UPDATE: APP_VERSION debe incrementarse en cada deploy.
+// El SW compara versiones y fuerza recarga automática en TODOS los usuarios
+// cuando detecta una versión nueva, sin necesidad de Ctrl+Shift+R manual.
+const APP_VERSION = '2026.07.17.1';
+window.APP_VERSION = APP_VERSION;
 const SW_SRC = `
-const CACHE  = 'intplanner-v12-cache-v1';
+const APP_VERSION = '${APP_VERSION}';
+const CACHE  = 'intplanner-cache-' + APP_VERSION;
 const ASSETS = [location.pathname || '/'];
 
 self.addEventListener('install', e => {
+  // skipWaiting inmediato: la nueva versión toma control sin esperar
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {
   e.waitUntil(
+    // Borrar TODOS los caches viejos (cualquier versión distinta a la actual)
     caches.keys().then(keys =>
       Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
     ).then(() => self.clients.claim())
+    .then(() => {
+      // Notificar a todos los clientes que hay nueva versión activa
+      return self.clients.matchAll({ type: 'window' }).then(clients => {
+        clients.forEach(client => client.postMessage({ type: 'SW_UPDATED', version: APP_VERSION }));
+      });
+    })
   );
 });
 
 self.addEventListener('fetch', e => {
   if(e.request.method !== 'GET') return;
   if(e.request.url.startsWith('chrome-extension')) return;
+  // FIX-AUTO-UPDATE: Para el HTML principal, SIEMPRE network-first sin cachear stale.
+  // Esto garantiza que cada carga obtenga la última versión desde GitHub Pages.
+  const isHTML = e.request.mode === 'navigate' ||
+                 e.request.destination === 'document' ||
+                 e.request.url.endsWith('.html') ||
+                 e.request.url.endsWith('/');
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, isHTML ? { cache: 'no-store' } : {})
       .then(res => {
-        if(res && res.status === 200 && res.type !== 'opaque') {
+        if(res && res.status === 200 && res.type !== 'opaque' && !isHTML) {
           caches.open(CACHE).then(c => c.put(e.request, res.clone()));
         }
         return res;
@@ -14753,6 +14858,10 @@ var _con = (function() {
         _con.log('✅ Service Worker registrado');
         window._swReg = reg;
         URL.revokeObjectURL(swUrl);
+        // FIX-AUTO-UPDATE: Guardar versión actual en el primer registro
+        if(!localStorage.getItem('ip_app_version')) {
+          localStorage.setItem('ip_app_version', APP_VERSION);
+        }
       })
       .catch(function(err) {
         URL.revokeObjectURL(swUrl);
@@ -14891,6 +15000,35 @@ const updateQueueBadge = () => {
 if('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', e => {
     if(e.data?.type === 'SYNC_NOW') SyncQueue.process();
+    // FIX-AUTO-UPDATE: El SW notifica cuando una nueva versión tomó control.
+    // Recargar automáticamente para que el usuario obtenga la última versión
+    // sin necesidad de Ctrl+Shift+R manual.
+    if(e.data?.type === 'SW_UPDATED') {
+      const nuevaVer = e.data.version;
+      const verGuardada = localStorage.getItem('ip_app_version');
+      // Solo recargar si es una versión DIFERENTE a la que ya teníamos cargada
+      // (evita bucle de recarga en la primera instalación)
+      if(verGuardada && verGuardada !== nuevaVer) {
+        localStorage.setItem('ip_app_version', nuevaVer);
+        console.log('🔄 Nueva versión detectada:', nuevaVer, '— recargando...');
+        // Pequeño delay para que el SW termine de activarse
+        setTimeout(() => window.location.reload(), 800);
+      } else {
+        localStorage.setItem('ip_app_version', nuevaVer);
+      }
+    }
+  });
+
+  // FIX-AUTO-UPDATE: Comprobar versión periódicamente (cada 5 min) y cuando la
+  // pestaña vuelve a estar visible. Fuerza al SW a buscar actualizaciones.
+  const _checkForUpdate = () => {
+    if(window._swReg && typeof window._swReg.update === 'function') {
+      window._swReg.update().catch(()=>{});
+    }
+  };
+  setInterval(_checkForUpdate, 300000); // cada 5 min
+  document.addEventListener('visibilitychange', () => {
+    if(document.visibilityState === 'visible') _checkForUpdate();
   });
 }
 
