@@ -91,6 +91,11 @@
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet" media="print" onload="this.media='all'"/>
 <noscript><link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet"/></noscript>
 <!-- Tailwind CDN eliminado — utilidades reemplazadas por CSS nativo -->
+<!-- Preconnect CDN — reduce DNS+TLS handshake por dominio (~100-300ms cada uno) -->
+<link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://unpkg.com" crossorigin>
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
 <!-- Firebase SDK — crítico: necesario antes del Babel bundle
      B8: SRI (Subresource Integrity) — verifica integridad del script descargado.
      Si el CDN es comprometido, el navegador rechaza el script que no coincida.
@@ -102,8 +107,9 @@
         crossorigin="anonymous"></script>
 <script src="https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore-compat.js"
         crossorigin="anonymous"></script>
+<!-- FIX-PERF: Storage defer — solo se usa en StorageDiag, no durante arranque -->
 <script src="https://www.gstatic.com/firebasejs/12.15.0/firebase-storage-compat.js"
-        crossorigin="anonymous"></script>
+        crossorigin="anonymous" defer></script>
 <!-- E-03 FIX: Firebase RTDB SDK — faltaba en el head y se usaba firebase.database()
      en el código para el módulo de Chat en tiempo real. Su ausencia causaba
      TypeError: firebase.database is not a function al inicializar Firebase,
@@ -902,9 +908,13 @@ const _isRestoreGracePeriod = () => {
     const ts = parseInt(localStorage.getItem('ip_restore_ts')||'0');
     if(!ts) return false;
     const elapsed = Date.now() - ts;
-    // Gracia de 120s: tiempo suficiente para que doFirebaseSync suba los datos.
-    // Después de 120s, Firestore vuelve a ser la fuente de verdad.
-    if(elapsed > 120000) {
+    // Gracia de 300s (5 min): tiempo suficiente para:
+    //   1. Reload de la app (~3s)
+    //   2. Auth Firebase se establezca (~3-5s)
+    //   3. Post-restore sync suba 650+ docs en batches (~30-60s)
+    //   4. onSnapshot de otros usuarios reciba los cambios
+    // Después de 300s, Firestore vuelve a ser la fuente de verdad.
+    if(elapsed > 300000) {
       localStorage.removeItem('ip_restore_ts');
       return false;
     }
@@ -7985,13 +7995,16 @@ const ChatSvc = {
   },
 
   // Presencia online
-  // V20-FIX: ahora persiste el campo `ts` actualizado, expone la lista completa de
-  // usuarios online (no solo el conteo), y considera offline cualquier sesión sin
-  // heartbeat reciente (>90s) aunque RTDB la marque como online (sesiones colgadas).
+  // FIX-PRESENCIA-FINAL: Implementación basada en .info/connected (Firebase best practice).
+  // .info/connected detecta conexión REAL al servidor RTDB, no solo navigator.onLine.
+  // Sin esto, onDisconnect() no se re-registra tras reconexiones y las sesiones quedan
+  // como "colgadas" (online=true pero sin heartbeat).
   setOnline: (userId, nombre, extra) => {
     if(!RTDB_OK || !userId) return null;
-    const ref = _rtdb.ref(ChatSvc.PATH_PRESENCIA+'/'+userId);
-    const heartbeat = () => ref.set({
+    const presRef = _rtdb.ref(ChatSvc.PATH_PRESENCIA+'/'+userId);
+    const connRef = _rtdb.ref('.info/connected');
+
+    const userData = {
       nombre:       nombre || 'Usuario',
       email:        (extra&&extra.email)  || '',
       cargo:        (extra&&extra.cargo)  || '',
@@ -7999,19 +8012,42 @@ const ChatSvc = {
       horaConexion: (extra&&extra.horaConexion) || Date.now(),
       online: true,
       ts: firebase.database.ServerValue.TIMESTAMP
+    };
+
+    // Listener de conexión: cada vez que RTDB conecta/reconecta,
+    // re-registra onDisconnect y actualiza presencia.
+    const connHandler = connRef.on('value', snap => {
+      if(snap.val() === true) {
+        // Conectado: registrar onDisconnect PRIMERO, luego marcar online
+        presRef.onDisconnect().update({
+          online: false,
+          ts: firebase.database.ServerValue.TIMESTAMP
+        }).then(() => {
+          presRef.set(userData).catch(e => {
+            console.warn('ChatSvc.setOnline write error:', e.message);
+          });
+        });
+      }
     });
-    heartbeat();
-    ref.onDisconnect().update({online:false, ts: firebase.database.ServerValue.TIMESTAMP});
-    // Heartbeat cada 30s para mantener "online" aunque haya inactividad
-    const hbInterval = setInterval(heartbeat, 30000);
-    // Devolver función para detener heartbeat al desmontar
+
+    // Heartbeat cada 30s: mantiene ts actualizado para detección de sesiones colgadas
+    const hbInterval = setInterval(() => {
+      presRef.update({
+        online: true,
+        ts: firebase.database.ServerValue.TIMESTAMP
+      }).catch(() => {});
+    }, 30000);
+
+    // Cleanup
     return () => {
       clearInterval(hbInterval);
-      try { ref.update({online:false, ts: firebase.database.ServerValue.TIMESTAMP}); } catch(_){}
+      connRef.off('value', connHandler);
+      try { presRef.update({online:false, ts: firebase.database.ServerValue.TIMESTAMP}); } catch(_){}
     };
   },
 
   // onPresencia: callback recibe { online: number, users: [{id, nombre}] }
+  // FIX-PRESENCIA-FINAL: Agregado error handler y tolerancia a clock skew
   onPresencia: (cb) => {
     if(!RTDB_OK) {
       cb({ online: 0, users: [] });
@@ -8023,11 +8059,20 @@ const ChatSvc = {
       const now = Date.now();
       const users = Object.entries(lastData)
         .filter(([,v])=>v && v.online === true)
+        // FIX-PRESENCIA-FINAL: Tolerancia de 5 min (300s) entre reloj del servidor y cliente
+        // Usa Math.abs para manejar relojes adelantados o atrasados
         .filter(([,v])=>!v.ts || Math.abs(now - v.ts) < 300000)
         .map(([id,v])=>({ id, nombre:v.nombre||'Usuario', email:v.email||'', cargo:v.cargo||'', rol:v.rol||'', horaConexion:v.horaConexion||v.ts||now, estado:'Activo' }));
       cb({ online: users.length, users });
     };
-    const handler = ref.on('value', snap => { lastData = snap.val()||{}; compute(); });
+    const handler = ref.on('value', snap => {
+      lastData = snap.val()||{};
+      compute();
+    }, err => {
+      // FIX-PRESENCIA-FINAL: Error handler — permisos RTDB denegados
+      console.warn('ChatSvc.onPresencia RTDB error:', err.message);
+      cb({ online: 0, users: [], error: err.message });
+    });
     // Re-evaluar cada 15s para depurar sesiones colgadas
     const tickInterval = setInterval(compute, 15000);
     return () => { ref.off('value', handler); clearInterval(tickInterval); };
@@ -15003,39 +15048,75 @@ const AutoBackup = {
 window.AutoBackup = AutoBackup;
 
 // ── POST-RESTORE SYNC — sube datos restaurados a Firestore tras reload ───────
-// restaurarBackup() guarda ip_restore_pending antes de recargar.
-// Al recargar, este bloque detecta la marca, lee los datos ya limpios de
-// localStorage (que sobreviven gracias a ip_restore_ts grace period)
-// y los sube a Firestore en batch. Una vez completado, limpia las marcas.
+// FIX-SYNC-ROOT: Ahora espera autenticación Firebase antes de subir datos.
+// Sin auth, las reglas de seguridad de Firestore rechazan TODOS los writes
+// y los demás usuarios nunca ven los datos restaurados.
 window.addEventListener('load', () => {
-  setTimeout(() => {
+  const _tryRestoreSync = () => {
     try {
       const pending = JSON.parse(localStorage.getItem('ip_restore_pending')||'null');
       if(!pending || !FIREBASE_OK || !navigator.onLine) return;
       // Solo si fue reciente (<120s)
-      if(Date.now() - pending.ts > 120000) {
+      if(Date.now() - pending.ts > 300000) {
         localStorage.removeItem('ip_restore_pending');
         return;
       }
+      // FIX-SYNC-ROOT: Verificar que hay sesión de Firebase Auth activa
+      // Sin esto, Firestore rules rechazan los batch.set() y el sync falla silenciosamente
+      if(!_auth || !_auth.currentUser) {
+        console.log('⏳ Post-restore sync: esperando autenticación...');
+        // Reintentar en 3s — onAuthStateChanged debería completar antes
+        setTimeout(_tryRestoreSync, 3000);
+        return;
+      }
+
       const COLS = pending.cols || [];
       if(COLS.length === 0) return;
 
-      console.log('🔄 Post-restore sync: subiendo', COLS.join(', '), 'a Firestore...');
+      const totalDocs = COLS.reduce((sum, c) => {
+        try { return sum + JSON.parse(localStorage.getItem('ip_'+c)||'[]').length; }
+        catch(_) { return sum; }
+      }, 0);
+      console.log('🔄 Post-restore sync: subiendo', totalDocs, 'docs de', COLS.join(', '), 'a Firestore...');
+      if(window.__ipToast) window.__ipToast('Sincronizando ' + totalDocs + ' registros con Firebase...', 'info');
 
       const syncAll = async () => {
-        let synced = 0;
+        let synced = 0, errors = 0;
         for(const c of COLS) {
           const arr = JSON.parse(localStorage.getItem('ip_'+c)||'[]');
-          const BATCH_SIZE = 450;
+          const BATCH_SIZE = 400; // Margen seguro bajo 500
           for(let i = 0; i < arr.length; i += BATCH_SIZE) {
             const batch = _db.batch();
             const slice = arr.slice(i, i + BATCH_SIZE);
             for(const doc of slice) {
               if(!doc || !doc.id) continue;
-              // Limpiar _serverTs (no se puede escribir directamente un FieldValue desde JSON)
+              // FIX-SYNC-ROOT: Limpiar TODOS los campos con Timestamps serializados
+              // Firestore rechaza {seconds:X, nanoseconds:Y} como valor directo —
+              // solo acepta FieldValue.serverTimestamp() o Timestamp instances.
               const clean = {...doc};
-              if(clean._serverTs && typeof clean._serverTs === 'object') {
-                clean._serverTs = firebase.firestore.FieldValue.serverTimestamp();
+              for(const [key, val] of Object.entries(clean)) {
+                if(val && typeof val === 'object' && !Array.isArray(val)
+                   && val.seconds !== undefined && val.nanoseconds !== undefined) {
+                  clean[key] = firebase.firestore.FieldValue.serverTimestamp();
+                }
+              }
+              // Limpiar fotos base64 (no pertenecen a Firestore)
+              if(c === 'equipo' && clean.foto && (clean.foto.startsWith('data:') || clean.foto === '__local_foto__')) {
+                clean.foto = '';
+              }
+              if(c === 'clientes' && clean.logo && (clean.logo.startsWith('data:') || clean.logo === '__local__')) {
+                clean.logo = '';
+              }
+              // Limpiar soporteCierre grandes
+              if(c === 'tareas' && clean.soporteCierre) {
+                if(typeof clean.soporteCierre === 'string' && clean.soporteCierre.length > 10000) {
+                  clean.soporteCierre = '';
+                }
+                if(Array.isArray(clean.soporteCierre)) {
+                  clean.soporteCierre = clean.soporteCierre.map(a =>
+                    (a && a.data && a.data.length > 10000) ? {...a, data: '', _stripped: true} : a
+                  );
+                }
               }
               batch.set(_db.collection(c).doc(doc.id), clean, {merge:true});
             }
@@ -15043,7 +15124,8 @@ window.addEventListener('load', () => {
               await batch.commit();
               synced += slice.length;
             } catch(e) {
-              console.warn('Post-restore sync error en', c, ':', e.message);
+              console.warn('Post-restore sync error en', c, '(batch ' + Math.floor(i/BATCH_SIZE) + '):', e.message);
+              errors += slice.length;
               // Encolar para reintento
               for(const doc of slice) {
                 if(doc?.id && window.OfflineQueue) window.OfflineQueue.push(c, doc, 'set');
@@ -15051,19 +15133,24 @@ window.addEventListener('load', () => {
             }
           }
         }
-        console.log('✅ Post-restore sync completado:', synced, 'documentos');
+        console.log('✅ Post-restore sync:', synced, 'OK,', errors, 'errores');
         localStorage.removeItem('ip_restore_pending');
-        // Mantener ip_restore_ts activo para que onSnapshot no sobreescriba
-        // Se auto-limpia en _isRestoreGracePeriod() después de 120s
-        if(window.__ipToast) window.__ipToast('Datos sincronizados con Firebase (' + synced + ' registros)', 'success');
+        const msg = errors > 0
+          ? 'Firebase: ' + synced + ' registros sincronizados, ' + errors + ' con error'
+          : 'Firebase sincronizado: ' + synced + ' registros ✅';
+        if(window.__ipToast) window.__ipToast(msg, errors > 0 ? 'warning' : 'success');
       };
 
       syncAll().catch(e => {
         console.warn('Post-restore sync parcial:', e.message);
         localStorage.removeItem('ip_restore_pending');
+        if(window.__ipToast) window.__ipToast('Error al sincronizar con Firebase: ' + e.message, 'error');
       });
     } catch(_){}
-  }, 5000); // Esperar 5s a que la app esté completamente montada
+  };
+
+  // Esperar 5s a que la app monte + auth se establezca
+  setTimeout(_tryRestoreSync, 5000);
 });
 
 // ── DIAGNÓSTICO DE FIREBASE STORAGE ──────────────────────────
