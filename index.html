@@ -442,8 +442,9 @@ textarea.inp{resize:vertical;min-height:80px}
     }
   });
   _obs.observe(document.getElementById("root")||document.body, {childList:true,subtree:true});
-  // Fallback: ocultar splash tras 15s aunque React no monte
-  setTimeout(function(){ if(_sp){ _sp.classList.add("hide"); setTimeout(function(){ _sp.remove(); },600); } },15000);
+  // Fallback: ocultar splash tras 8s aunque React no monte
+  // FIX-PERF: Reducido de 15s a 8s — suficiente para Babel + React mount
+  setTimeout(function(){ if(_sp){ _sp.classList.add("hide"); setTimeout(function(){ _sp.remove(); },600); } },8000);
 })();
 </script>
 <script type="text/babel">
@@ -1001,7 +1002,8 @@ const LogoStore = {
   },
 };
 // Ejecutar migración al arrancar (sin bloquear el hilo principal)
-setTimeout(() => LogoStore.migrateAll(), 500);
+// FIX-PERF: Retrasado de 500ms a 3s — no competir con React hydration
+setTimeout(() => LogoStore.migrateAll(), 3000);
 
 const DB = {
   // Lee colección completa (fallback localStorage)
@@ -12987,8 +12989,20 @@ const Config = () => {
   const restaurarBackup = async (file) => {
     if(!file) return;
     try {
-      toast('Procesando backup...', 'info');
-      const text = await file.text();
+      // FIX-RESTORE-V2: Validar tamaño antes de procesar (evita OOM en archivos enormes)
+      if(file.size > 20 * 1024 * 1024) {
+        toast('Error: archivo demasiado grande (máximo 20MB)','error'); return;
+      }
+      toast('Leyendo backup (' + (file.size/1024/1024).toFixed(1) + ' MB)...', 'info');
+
+      // FIX-RESTORE-V2: Leer archivo de forma no bloqueante
+      const text = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('Error al leer el archivo'));
+        reader.readAsText(file);
+      });
+
       let data;
       try { data = JSON.parse(text); } catch(pe) {
         toast('Error: el archivo no es un JSON valido','error'); return;
@@ -12999,6 +13013,8 @@ const Config = () => {
       const hasContent = COLS.some(c => Array.isArray(data[c]) && data[c].length > 0) || data.ts;
       if(!hasContent) { toast('Error: backup vacio o formato incorrecto','error'); return; }
 
+      toast('Procesando ' + COLS.reduce((a,c) => a + (Array.isArray(data[c]) ? data[c].length : 0), 0) + ' registros...', 'info');
+
       // FIX-QUOTA: Limpiar localStorage ANTES de escribir
       // Evita QuotaExceededError cuando hay datos previos ocupando espacio
       const KEYS_LIMPIAR = ['ip_autobackup','ip_autobackup_hist',...COLS.map(c=>'ip_'+c)];
@@ -13007,17 +13023,45 @@ const Config = () => {
       // FIX-QUOTA: Limpiar fotos base64 de equipo (pueden ser 200-400KB cada una)
       // Las fotos se guardan en LogoStore/IndexedDB, no en localStorage
       const limpiarFotos = (arr) => arr.map(item => {
-        if(item && item.foto && item.foto.startsWith('data:')) {
+        if(item && item.foto && typeof item.foto === 'string' && item.foto.startsWith('data:')) {
           return {...item, foto: ''};
         }
         return item;
       });
 
-      // FIX-QUOTA: Limpiar soporteCierre grandes (archivos adjuntos base64 en tareas)
+      // FIX-QUOTA-V2: Limpiar soporteCierre grandes — soporta AMBOS formatos:
+      //   - string directa (base64 embebido)
+      //   - array de objetos con campo 'data' que contiene base64
+      // El backup del 2026-07-07 tiene 6 tareas con soporteCierre de 127-965KB
       const limpiarSoporte = (arr) => arr.map(item => {
-        if(item && item.soporteCierre && typeof item.soporteCierre === 'string'
-           && item.soporteCierre.length > 10000) {
+        if(!item) return item;
+        const sc = item.soporteCierre;
+        if(!sc) return item;
+        // Caso 1: string directa > 10KB
+        if(typeof sc === 'string' && sc.length > 10000) {
           return {...item, soporteCierre: ''};
+        }
+        // Caso 2: array de adjuntos con campo 'data' base64
+        if(Array.isArray(sc)) {
+          const cleaned = sc.map(adj => {
+            if(adj && typeof adj === 'object' && typeof adj.data === 'string' && adj.data.length > 10000) {
+              return {...adj, data: '', _stripped: true};
+            }
+            return adj;
+          });
+          // Si el array serializado sigue > 50KB, vaciar todo
+          const testSize = JSON.stringify(cleaned).length;
+          return {...item, soporteCierre: testSize > 50000 ? [] : cleaned};
+        }
+        return item;
+      });
+
+      // FIX-QUOTA-V2: Limpiar logos de clientes para localStorage
+      const limpiarLogos = (arr) => arr.map(item => {
+        if(item && item.logo && typeof item.logo === 'string' && item.logo.startsWith('data:image')) {
+          // Migrar al LogoStore antes de limpiar
+          if(item.id) LogoStore.save(item.id, item.logo);
+          return {...item, logo: '__local__'};
         }
         return item;
       });
@@ -13030,13 +13074,34 @@ const Config = () => {
         if(!Array.isArray(data[c])) return;
         try {
           let arr = data[c];
-          if(c === 'equipo')  arr = limpiarFotos(arr);
-          if(c === 'tareas')  arr = limpiarSoporte(arr);
+          if(c === 'equipo')   arr = limpiarFotos(arr);
+          if(c === 'tareas')   arr = limpiarSoporte(arr);
+          if(c === 'clientes') arr = limpiarLogos(arr);
           localStorage.setItem('ip_'+c, JSON.stringify(arr));
           total += arr.length;
         } catch(qe) {
-          errores.push(c);
-          console.warn('FIX-QUOTA: No se pudo escribir ip_'+c+':', qe.message);
+          // FIX-QUOTA-V2: Si falla por cuota, intentar con limpieza más agresiva
+          console.warn('FIX-QUOTA: Primer intento fallido para ip_'+c+':', qe.message);
+          try {
+            let arr = data[c].map(item => {
+              if(!item || typeof item !== 'object') return item;
+              const cleaned = {};
+              for(const [k,v] of Object.entries(item)) {
+                // Eliminar cualquier campo string > 5KB (probablemente base64)
+                if(typeof v === 'string' && v.length > 5000 && (v.startsWith('data:') || v.length > 50000)) {
+                  cleaned[k] = '';
+                } else {
+                  cleaned[k] = v;
+                }
+              }
+              return cleaned;
+            });
+            localStorage.setItem('ip_'+c, JSON.stringify(arr));
+            total += arr.length;
+          } catch(qe2) {
+            errores.push(c);
+            console.warn('FIX-QUOTA: No se pudo escribir ip_'+c+':', qe2.message);
+          }
         }
       });
       try { if(data.cfg)        localStorage.setItem('ip_config',     JSON.stringify(data.cfg)); } catch(_){}
@@ -13048,25 +13113,36 @@ const Config = () => {
       setBackup(info);
       try { localStorage.setItem('ip_backup', JSON.stringify(info)); } catch(_){}
 
-      const msgExtra = errores.length > 0 ? ` (${errores.join(',')} con error)` : '';
+      const msgExtra = errores.length > 0 ? ` (${errores.join(',')} con error de cuota)` : '';
       toast(`Backup restaurado: ${total} registros${msgExtra}. Recargando...`, 'success');
 
-      // PASO 2: Sincronizar en Firebase en segundo plano
+      // PASO 2: Sincronizar en Firebase en segundo plano (batch para velocidad)
       const doFirebaseSync = async () => {
         if(!FIREBASE_OK || !window.IP_ONLINE) return;
         let synced = 0;
         for(const c of COLS) {
           if(!Array.isArray(data[c])) continue;
           let arr = data[c];
-          if(c === 'equipo') arr = limpiarFotos(arr);
-          if(c === 'tareas') arr = limpiarSoporte(arr);
-          for(const doc of arr) {
-            if(!doc || !doc.id) continue;
+          if(c === 'equipo')   arr = limpiarFotos(arr);
+          if(c === 'tareas')   arr = limpiarSoporte(arr);
+          if(c === 'clientes') arr = limpiarLogos(arr);
+          // FIX-RESTORE-V2: Usar Firestore batch writes (max 500 por batch)
+          const BATCH_SIZE = 450;
+          for(let i = 0; i < arr.length; i += BATCH_SIZE) {
+            const batch = _db.batch();
+            const slice = arr.slice(i, i + BATCH_SIZE);
+            for(const doc of slice) {
+              if(!doc || !doc.id) continue;
+              batch.set(_db.collection(c).doc(doc.id), doc, {merge:true});
+            }
             try {
-              await _db.collection(c).doc(doc.id).set(doc, {merge:true});
-              synced++;
+              await batch.commit();
+              synced += slice.length;
             } catch(e) {
-              if(window.OfflineQueue) window.OfflineQueue.push(c, doc, 'set');
+              // Fallback: encolar individualmente
+              for(const doc of slice) {
+                if(doc?.id && window.OfflineQueue) window.OfflineQueue.push(c, doc, 'set');
+              }
             }
           }
         }
@@ -14285,7 +14361,6 @@ const App = () => {
               else if(_permCambio) toastFn('Tus permisos han sido actualizados.', 'info');
             }
           }
-        }          }
         }
       }, () => {/* sin red: ignorar silenciosamente */});
     }
@@ -14677,7 +14752,21 @@ const AutoBackup = {
       snapshot.usuarios   = JSON.parse(localStorage.getItem('ip_usuarios')||'[]');
 
       // 1. Guardar snapshot completo en localStorage (siempre, inmediato)
-      localStorage.setItem('ip_autobackup', JSON.stringify(snapshot));
+      // FIX-AUTOBACKUP-V2: Intentar guardar; si falla por cuota, guardar versión compacta
+      try {
+        localStorage.setItem('ip_autobackup', JSON.stringify(snapshot));
+      } catch(qe) {
+        // Comprimir: eliminar base64 de fotos y soporteCierre para reducir tamaño
+        const compact = JSON.parse(JSON.stringify(snapshot));
+        if(compact.cols.equipo) compact.cols.equipo = compact.cols.equipo.map(e => e.foto?.startsWith?.('data:') ? {...e, foto:''} : e);
+        if(compact.cols.tareas) compact.cols.tareas = compact.cols.tareas.map(t => {
+          if(typeof t.soporteCierre === 'string' && t.soporteCierre.length > 5000) return {...t, soporteCierre:''};
+          if(Array.isArray(t.soporteCierre)) return {...t, soporteCierre: t.soporteCierre.map(a => a?.data?.length > 5000 ? {...a, data:'', _stripped:true} : a)};
+          return t;
+        });
+        try { localStorage.setItem('ip_autobackup', JSON.stringify(compact)); }
+        catch(_) { console.warn('AutoBackup: no se pudo guardar snapshot local (cuota llena)'); }
+      }
 
       // 2. Historial local — últimas 10 entradas
       const hist = JSON.parse(localStorage.getItem('ip_autobackup_hist')||'[]');
@@ -15200,8 +15289,9 @@ window.addEventListener('load', () => {
 });
 
 // Auto-backup al cargar si hay datos existentes
-// Se retrasa 1s para garantizar que window.AutoBackup esté disponible
-// (el bloque Babel transpila de forma asíncrona)
+// FIX-PERF: Retraso aumentado a 10s — el backup al arrancar bloqueaba el hilo
+// principal durante ~500ms al re-serializar 3MB+ de datos (587 tareas + logos).
+// 10s garantiza que React ya montó y el usuario puede interactuar.
 window.addEventListener('load', () => {
   setTimeout(() => {
     const cols = ['tareas','clientes','equipo','proyectos','facturas',
@@ -15210,10 +15300,9 @@ window.addEventListener('load', () => {
       try { return JSON.parse(localStorage.getItem('ip_'+c)||'[]').length > 0; } catch(_){ return false; }
     });
     if(tienedatos && window.AutoBackup) {
-      // Ejecutar backup inmediato al iniciar si hay datos (garantiza que ip_autobackup esté al día)
       window.AutoBackup.run();
     }
-  }, 1000);
+  }, 10000);
 });
 </script>
 </body>
