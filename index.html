@@ -908,12 +908,8 @@ const _isRestoreGracePeriod = () => {
     const ts = parseInt(localStorage.getItem('ip_restore_ts')||'0');
     if(!ts) return false;
     const elapsed = Date.now() - ts;
-    // Gracia de 300s (5 min): tiempo suficiente para:
-    //   1. Reload de la app (~3s)
-    //   2. Auth Firebase se establezca (~3-5s)
-    //   3. Post-restore sync suba 650+ docs en batches (~30-60s)
-    //   4. onSnapshot de otros usuarios reciba los cambios
-    // Después de 300s, Firestore vuelve a ser la fuente de verdad.
+    // Gracia de 300s (5 min): protege datos restaurados hasta que
+    // post-restore sync complete la subida a Firestore.
     if(elapsed > 300000) {
       localStorage.removeItem('ip_restore_ts');
       return false;
@@ -1265,6 +1261,36 @@ const DB = {
         localArr
           .filter(d => !fsIds.has(d.id) && _isLocalPending(col, d.id))
           .forEach(d => merged.push(d));
+
+        // FIX-SYNC-PROTECT: NUNCA sobreescribir localStorage si el merge produce
+        // significativamente MENOS registros que lo que ya hay guardado.
+        // Esto ocurre cuando:
+        //   - Post-restore sync no completó (logout prematuro, timeout, error auth)
+        //   - Firestore devuelve 0 docs pero localStorage tiene 500+
+        //   - enablePersistence cache fue limpiado por Ctrl+Shift+R
+        // Sin esta protección, la línea localStorage.setItem('ip_'+col, '[]')
+        // BORRA irreversiblemente los datos del backup.
+        const localCount = localArr.length;
+        const mergedCount = merged.length;
+        if(localCount > 10 && mergedCount === 0) {
+          // Firestore vacío + localStorage con datos → PRESERVAR localStorage
+          console.warn('DB.sub PROTECCIÓN:', col, '— Firestore devolvió 0 docs pero localStorage tiene', localCount, '— preservando datos locales');
+          cb(col === 'clientes'
+            ? localArr.map(d => d.logo === '__local__' ? {...d, logo: LogoStore.get(d.id)||''} : d)
+            : localArr
+          );
+          return; // NO escribir a localStorage
+        }
+        if(localCount > 20 && mergedCount < localCount * 0.3) {
+          // Firestore tiene <30% de los docs locales → PRESERVAR localStorage
+          // (Firestore probablemente recibió sync parcial)
+          console.warn('DB.sub PROTECCIÓN:', col, '— merge produjo', mergedCount, 'docs vs', localCount, 'locales — preservando locales');
+          cb(col === 'clientes'
+            ? localArr.map(d => d.logo === '__local__' ? {...d, logo: LogoStore.get(d.id)||''} : d)
+            : localArr
+          );
+          return; // NO escribir a localStorage
+        }
 
         // LOGO-FIX: Guardar versión sin logos embebidos para evitar QuotaExceededError
         const mergedCompact = merged.map(d =>
@@ -14427,6 +14453,22 @@ const App = () => {
       DB.sub('cargos',setCargos),
     ];
 
+    // FIX-SYNC-RETRY: Si hay un restore pendiente que no se completó (por logout
+    // prematuro, error de auth, o timeout), relanzar la sincronización ahora que
+    // el usuario está autenticado. Sin esto, al cerrar sesión antes de que el sync
+    // termine, Firestore queda vacío/parcial y el próximo login descarta los datos.
+    const _restorePending = JSON.parse(localStorage.getItem('ip_restore_pending')||'null');
+    if(_restorePending && FIREBASE_OK && _auth?.currentUser) {
+      console.log('🔄 Re-lanzando post-restore sync (pendiente de sesión anterior)...');
+      // Renovar ip_restore_ts para que la gracia cubra este nuevo intento
+      try { localStorage.setItem('ip_restore_ts', String(Date.now())); } catch(_){}
+      // Dejar que el listener de window.load lo procese (ya tiene la lógica completa)
+      // o dispararlo directamente si ya pasó el load
+      if(window._tryRestoreSync) {
+        setTimeout(window._tryRestoreSync, 2000);
+      }
+    }
+
     // PERMISOS EN TIEMPO REAL (B-PERMISOS):
     // Suscripción onSnapshot al propio documento del usuario logueado.
     // Cuando el admin cambia permisos/rol/activo de este usuario en Firestore,
@@ -15151,6 +15193,8 @@ window.addEventListener('load', () => {
 
   // Esperar 5s a que la app monte + auth se establezca
   setTimeout(_tryRestoreSync, 5000);
+  // FIX-SYNC-RETRY: Exponer para que App useEffect pueda relanzar si hay pending
+  window._tryRestoreSync = _tryRestoreSync;
 });
 
 // ── DIAGNÓSTICO DE FIREBASE STORAGE ──────────────────────────
