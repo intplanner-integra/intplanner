@@ -2,6 +2,7 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8"/>
+<meta http-equiv="x-dns-prefetch-control" content="on"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
@@ -78,7 +79,17 @@
 </script>
 <title>INTPLANNER PRO | Integra Consultores</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%231E3A5F'/%3E%3Ctext y='.9em' font-size='60' x='50%25' text-anchor='middle' fill='%23C9A84C' font-weight='bold'%3EIP%3C/text%3E%3C/svg%3E"/>
-<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet"/>
+<!-- OPT-1: Preconnect CDNs - reduce latencia DNS+TLS por dominio -->
+<link rel="preconnect" href="https://www.gstatic.com" crossorigin/>
+<link rel="preconnect" href="https://unpkg.com" crossorigin/>
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin/>
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link rel="preconnect" href="https://firestore.googleapis.com" crossorigin/>
+<link rel="dns-prefetch" href="https://intplanner-v12-default-rtdb.firebaseio.com"/>
+<!-- OPT-1b: Fonts con media=print para no bloquear render inicial -->
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet" media="print" onload="this.media='all'"/>
+<noscript><link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet"/></noscript>
 <!-- Tailwind CDN eliminado — utilidades reemplazadas por CSS nativo -->
 <!-- Firebase SDK — crítico: necesario antes del Babel bundle
      B8: SRI (Subresource Integrity) — verifica integridad del script descargado.
@@ -106,10 +117,10 @@
      y la app no arranque. SRI calculado sobre el binario exacto de 18.3.1. -->
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"
         integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z"
-        crossorigin="anonymous"></script>
+        crossorigin="anonymous" fetchpriority="high"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"
         integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1"
-        crossorigin="anonymous"></script>
+        crossorigin="anonymous" fetchpriority="high"></script>
 <!-- Babel Standalone v7.29.2 — crítico en este setup: transpila JSX en runtime.
      HASH calculado sobre @babel/standalone@7.29.2/babel.min.js (3,137,678 bytes).
      URL fijada a versión semántica exacta para evitar drift de SRI en updates futuros.
@@ -117,7 +128,7 @@
      Impacto estimado: -800ms a -2000ms en tiempo de carga inicial. -->
 <script src="https://unpkg.com/@babel/standalone@7.29.2/babel.min.js"
         integrity="sha384-dqDn4UOhYWNxmtwnMX6yC3WtZZ6Li8rF6rLB7cu0i/R7btvb+p+kObgEHto7VsJK"
-        crossorigin="anonymous"></script>
+        crossorigin="anonymous" fetchpriority="high"></script>
 <!-- Librerías auxiliares — usadas solo en módulos específicos.
      B8: SRI habilitado en los tres scripts CDN de cdnjs.cloudflare.com.
      MEJORA FUTURA (v13): convertir a importación dinámica (import()) dentro
@@ -136,6 +147,18 @@
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 body{font-family:'DM Sans',sans-serif;background:#0f1923;color:#e2e8f0;margin:0;overflow-x:hidden}
+/* OPT-2: Splash screen - visible mientras Babel transpila JSX */
+#ip-splash{position:fixed;inset:0;z-index:99999;background:#0f1923;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;
+  transition:opacity .5s ease;}
+#ip-splash.hide{opacity:0;pointer-events:none;}
+#ip-splash .bar-wrap{width:220px;height:3px;background:#1e2d42;border-radius:99px;overflow:hidden;}
+#ip-splash .bar{height:100%;background:linear-gradient(90deg,#C9A84C,#f0c060);
+  border-radius:99px;animation:ip-load 4s ease-in-out forwards;}
+#ip-splash .msg{font-size:12px;color:#475569;}
+@keyframes ip-load{0%{width:5%}40%{width:55%}70%{width:80%}90%{width:93%}100%{width:97%}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+@keyframes spin{to{transform:rotate(360deg)}}
 h1,h2,h3,.sy{font-family:'Syne',sans-serif}
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:#0f1923}
@@ -392,7 +415,37 @@ textarea.inp{resize:vertical;min-height:80px}
 </style>
 </head>
 <body>
+<!-- OPT-2: Splash screen HTML -->
+<div id="ip-splash">
+  <div style="display:flex;align-items:center;gap:12px;">
+    <div style="width:36px;height:36px;border-radius:8px;background:linear-gradient(135deg,#C9A84C,#b8943e);display:flex;align-items:center;justify-content:center;">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+        <path d="M9 11l3 3L22 4" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div style="font-size:20px;font-weight:800;color:#fff;letter-spacing:.3px;">INT<span style="color:#C9A84C;">PLANNER</span> <span style="font-size:11px;font-weight:400;color:#475569;">PRO</span></div>
+  </div>
+  <div class="bar-wrap"><div class="bar"></div></div>
+  <div class="msg">Cargando aplicacion...</div>
+</div>
 <div id="root"></div>
+<script>
+// OPT-2: Ocultar splash cuando React termina de montar
+(function(){
+  var _sp = document.getElementById("ip-splash");
+  var _obs = new MutationObserver(function(){
+    var root = document.getElementById("root");
+    if(root && root.children.length > 0) {
+      _obs.disconnect();
+      setTimeout(function(){ if(_sp){ _sp.classList.add("hide"); setTimeout(function(){ _sp.remove(); },600); } },300);
+    }
+  });
+  _obs.observe(document.getElementById("root")||document.body, {childList:true,subtree:true});
+  // Fallback: ocultar splash tras 15s aunque React no monte
+  setTimeout(function(){ if(_sp){ _sp.classList.add("hide"); setTimeout(function(){ _sp.remove(); },600); } },15000);
+})();
+</script>
 <script type="text/babel">
 // ── INTPLANNER V13.1 — PARCHE QA APLICADO ────────────────────
 // Correcciones: iconos faltantes · CSS utilities · ErrorBoundary
@@ -2358,7 +2411,7 @@ const Header = ({title,user,onLogout,backup,onMobOpen}) => {
           borderColor:pushOn?'rgba(201,168,76,.3)':'#243447',background:pushOn?'rgba(201,168,76,.08)':'transparent',color:pushOn?'#C9A84C':'#475569'}}>
         <span style={{fontSize:13}}>{pushOn?'🔔':'🔕'}</span>
       </div>
-      {/* Indicador usuarios en linea - PresenciaBadge global */}
+      {/* Indicador usuarios en linea */}
       <PresenciaBadge/>
       {/* Indicador auto-backup */}
       <div className="mob-hide" title={lastBackup?`Último backup: ${new Date(lastBackup.ts).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})}`:''} style={{display:'flex',alignItems:'center',gap:6,fontSize:11,fontWeight:600,padding:'4px 12px',borderRadius:20,border:'1px solid',borderColor:lastBackup?'rgba(74,222,128,.25)':'#243447',background:lastBackup?'rgba(26,107,58,.15)':'transparent',color:lastBackup?'#4ade80':'#475569'}}>
@@ -7877,17 +7930,8 @@ const ChatSvc = {
       const now = Date.now();
       const users = Object.entries(lastData)
         .filter(([,v])=>v && v.online === true)
-        // Filtrar sesiones colgadas: heartbeat más viejo que 90s = offline real
         .filter(([,v])=>!v.ts || Math.abs(now - v.ts) < 300000)
-        .map(([id,v])=>({
-          id,
-          nombre:       v.nombre       || 'Usuario',
-          email:        v.email        || '',
-          cargo:        v.cargo        || '',
-          rol:          v.rol          || '',
-          horaConexion: v.horaConexion || v.ts || now,
-          estado:       'Activo',
-        }));
+        .map(([id,v])=>({ id, nombre:v.nombre||'Usuario', email:v.email||'', cargo:v.cargo||'', rol:v.rol||'', horaConexion:v.horaConexion||v.ts||now, estado:'Activo' }));
       cb({ online: users.length, users });
     };
     const handler = ref.on('value', snap => { lastData = snap.val()||{}; compute(); });
@@ -7927,12 +7971,7 @@ const Chat = () => {
     const unsubMsgs    = ChatSvc.onMessages(setMsgs);
     const unsubTyping  = ChatSvc.onTyping(user.id, setTyping);
     const unsubPresencia = ChatSvc.onPresencia(setPresencia);
-    const unsubOnline  = ChatSvc.setOnline(user.id, user.nombre, {
-      email:        user.email  || '',
-      cargo:        user.cargo  || '',
-      rol:          user.rol    || '',
-      horaConexion: Date.now(),
-    });
+    const unsubOnline  = ChatSvc.setOnline(user.id, user.nombre);
     return ()=>{
       unsubMsgs?.(); unsubTyping?.(); unsubPresencia?.();
       if(typeof unsubOnline === 'function') unsubOnline();
@@ -14214,7 +14253,7 @@ const App = () => {
     // Notificar a StorageDiag que hay sesion activa
     window.dispatchEvent(new CustomEvent('ip-user-ready', { detail: { uid: user.id } }));
 
-    // FIX-PRESENCIA GLOBAL: Registrar usuario online desde App en todos los modulos
+    // FIX-PRESENCIA GLOBAL: desde App - funciona en todos los modulos
     let _unsubOnlineGlobal = null;
     let _unsubPresGlobal   = null;
     if(RTDB_OK && user.id) {
@@ -14227,7 +14266,6 @@ const App = () => {
         window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: pres }));
       });
     }
-    // Estado inicial inmediato (antes de que RTDB confirme)
     const _presInit = { online:1, users:[{
       id:user.id, nombre:user.nombre||'Usuario', email:user.email||'',
       cargo:user.cargo||'', rol:user.rol||'', horaConexion:Date.now(), estado:'Activo'
