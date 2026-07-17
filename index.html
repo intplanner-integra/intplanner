@@ -892,7 +892,26 @@ const _isQueued = (col, docId, op) => {
   } catch(_) { return false; }
 };
 // Pendiente = escrito hace <5s (aún sin confirmar) o encolado offline como 'set'
-const _isLocalPending = (col, docId) => _isWriteLocked(col, docId) || _isQueued(col, docId, 'set');
+// FIX-RESTORE-ROOT: También considerar "pendiente" si hubo un backup restore reciente.
+// restaurarBackup escribe directamente a localStorage sin pasar por DB.set(),
+// por lo que _isWriteLocked y _isQueued retornan false. Sin este check,
+// onSnapshot de Firestore SOBREESCRIBE los datos restaurados con datos vacíos/viejos,
+// causando que el backup "no cargue" — los datos se pierden segundos después de restaurar.
+const _isRestoreGracePeriod = () => {
+  try {
+    const ts = parseInt(localStorage.getItem('ip_restore_ts')||'0');
+    if(!ts) return false;
+    const elapsed = Date.now() - ts;
+    // Gracia de 120s: tiempo suficiente para que doFirebaseSync suba los datos.
+    // Después de 120s, Firestore vuelve a ser la fuente de verdad.
+    if(elapsed > 120000) {
+      localStorage.removeItem('ip_restore_ts');
+      return false;
+    }
+    return true;
+  } catch(_) { return false; }
+};
+const _isLocalPending = (col, docId) => _isWriteLocked(col, docId) || _isQueued(col, docId, 'set') || _isRestoreGracePeriod();
 // IDs con borrado local encolado: deben ocultarse aunque Firestore aún los devuelva
 const _pendingDeletes = (col) => {
   try {
@@ -13113,45 +13132,27 @@ const Config = () => {
       setBackup(info);
       try { localStorage.setItem('ip_backup', JSON.stringify(info)); } catch(_){}
 
+      // FIX-RESTORE-ROOT: Marcar timestamp de restauración para que DB.sub
+      // NO descarte los datos locales cuando Firestore responda con datos viejos/vacíos.
+      // Sin esta marca, _isLocalPending() retorna false para datos restaurados
+      // (porque no pasaron por DB.set()) y onSnapshot los sobreescribe.
+      try { localStorage.setItem('ip_restore_ts', String(Date.now())); } catch(_){}
+
       const msgExtra = errores.length > 0 ? ` (${errores.join(',')} con error de cuota)` : '';
       toast(`Backup restaurado: ${total} registros${msgExtra}. Recargando...`, 'success');
 
       // PASO 2: Sincronizar en Firebase en segundo plano (batch para velocidad)
-      const doFirebaseSync = async () => {
-        if(!FIREBASE_OK || !window.IP_ONLINE) return;
-        let synced = 0;
-        for(const c of COLS) {
-          if(!Array.isArray(data[c])) continue;
-          let arr = data[c];
-          if(c === 'equipo')   arr = limpiarFotos(arr);
-          if(c === 'tareas')   arr = limpiarSoporte(arr);
-          if(c === 'clientes') arr = limpiarLogos(arr);
-          // FIX-RESTORE-V2: Usar Firestore batch writes (max 500 por batch)
-          const BATCH_SIZE = 450;
-          for(let i = 0; i < arr.length; i += BATCH_SIZE) {
-            const batch = _db.batch();
-            const slice = arr.slice(i, i + BATCH_SIZE);
-            for(const doc of slice) {
-              if(!doc || !doc.id) continue;
-              batch.set(_db.collection(c).doc(doc.id), doc, {merge:true});
-            }
-            try {
-              await batch.commit();
-              synced += slice.length;
-            } catch(e) {
-              // Fallback: encolar individualmente
-              for(const doc of slice) {
-                if(doc?.id && window.OfflineQueue) window.OfflineQueue.push(c, doc, 'set');
-              }
-            }
-          }
-        }
-        console.log('Backup restaurado en Firestore:', synced, 'documentos');
-      };
-      doFirebaseSync().catch(e => console.warn('Firebase sync parcial:', e.message));
+      // FIX-RESTORE-ROOT: La sincronización se hace DESPUÉS del reload.
+      // El flag ip_restore_ts protege los datos locales durante 120s,
+      // y al recargar, el useEffect de App relanza doFirebaseSync automáticamente
+      // vía ip_restore_pending. Esto evita que el reload interrumpa la subida.
+      try { localStorage.setItem('ip_restore_pending', JSON.stringify({
+        cols: COLS.filter(c => Array.isArray(data[c]) && data[c].length > 0),
+        ts: Date.now()
+      })); } catch(_){}
 
-      // PASO 3: Recargar tras 2.5s
-      setTimeout(() => window.location.reload(), 2500);
+      // PASO 3: Recargar tras 1.5s (más rápido porque ya no esperamos sync)
+      setTimeout(() => window.location.reload(), 1500);
 
     } catch(e) {
       console.error('restaurarBackup error:', e);
@@ -14907,6 +14908,70 @@ const AutoBackup = {
   last: () => JSON.parse(localStorage.getItem('ip_backup')||'null'),
 };
 window.AutoBackup = AutoBackup;
+
+// ── POST-RESTORE SYNC — sube datos restaurados a Firestore tras reload ───────
+// restaurarBackup() guarda ip_restore_pending antes de recargar.
+// Al recargar, este bloque detecta la marca, lee los datos ya limpios de
+// localStorage (que sobreviven gracias a ip_restore_ts grace period)
+// y los sube a Firestore en batch. Una vez completado, limpia las marcas.
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    try {
+      const pending = JSON.parse(localStorage.getItem('ip_restore_pending')||'null');
+      if(!pending || !FIREBASE_OK || !navigator.onLine) return;
+      // Solo si fue reciente (<120s)
+      if(Date.now() - pending.ts > 120000) {
+        localStorage.removeItem('ip_restore_pending');
+        return;
+      }
+      const COLS = pending.cols || [];
+      if(COLS.length === 0) return;
+
+      console.log('🔄 Post-restore sync: subiendo', COLS.join(', '), 'a Firestore...');
+
+      const syncAll = async () => {
+        let synced = 0;
+        for(const c of COLS) {
+          const arr = JSON.parse(localStorage.getItem('ip_'+c)||'[]');
+          const BATCH_SIZE = 450;
+          for(let i = 0; i < arr.length; i += BATCH_SIZE) {
+            const batch = _db.batch();
+            const slice = arr.slice(i, i + BATCH_SIZE);
+            for(const doc of slice) {
+              if(!doc || !doc.id) continue;
+              // Limpiar _serverTs (no se puede escribir directamente un FieldValue desde JSON)
+              const clean = {...doc};
+              if(clean._serverTs && typeof clean._serverTs === 'object') {
+                clean._serverTs = firebase.firestore.FieldValue.serverTimestamp();
+              }
+              batch.set(_db.collection(c).doc(doc.id), clean, {merge:true});
+            }
+            try {
+              await batch.commit();
+              synced += slice.length;
+            } catch(e) {
+              console.warn('Post-restore sync error en', c, ':', e.message);
+              // Encolar para reintento
+              for(const doc of slice) {
+                if(doc?.id && window.OfflineQueue) window.OfflineQueue.push(c, doc, 'set');
+              }
+            }
+          }
+        }
+        console.log('✅ Post-restore sync completado:', synced, 'documentos');
+        localStorage.removeItem('ip_restore_pending');
+        // Mantener ip_restore_ts activo para que onSnapshot no sobreescriba
+        // Se auto-limpia en _isRestoreGracePeriod() después de 120s
+        if(window.__ipToast) window.__ipToast('Datos sincronizados con Firebase (' + synced + ' registros)', 'success');
+      };
+
+      syncAll().catch(e => {
+        console.warn('Post-restore sync parcial:', e.message);
+        localStorage.removeItem('ip_restore_pending');
+      });
+    } catch(_){}
+  }, 5000); // Esperar 5s a que la app esté completamente montada
+});
 
 // ── DIAGNÓSTICO DE FIREBASE STORAGE ──────────────────────────
 // Verifica conectividad, permisos y configuración de Storage.
