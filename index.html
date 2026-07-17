@@ -12987,70 +12987,99 @@ const Config = () => {
   const restaurarBackup = async (file) => {
     if(!file) return;
     try {
+      toast('Procesando backup...', 'info');
       const text = await file.text();
       let data;
       try { data = JSON.parse(text); } catch(pe) {
-        toast('Error: el archivo no es un JSON válido','error'); return;
+        toast('Error: el archivo no es un JSON valido','error'); return;
       }
       const COLS = ['tareas','clientes','equipo','proyectos','facturas','anticipos','alertas','servicios','cargos','visitas_cliente'];
 
-      // Validación mínima: debe tener al menos una colección o ts
+      // Validacion minima
       const hasContent = COLS.some(c => Array.isArray(data[c]) && data[c].length > 0) || data.ts;
-      if(!hasContent) { toast('Error: el archivo de backup está vacío o tiene formato incorrecto','error'); return; }
+      if(!hasContent) { toast('Error: backup vacio o formato incorrecto','error'); return; }
+
+      // FIX-QUOTA: Limpiar localStorage ANTES de escribir
+      // Evita QuotaExceededError cuando hay datos previos ocupando espacio
+      const KEYS_LIMPIAR = ['ip_autobackup','ip_autobackup_hist',...COLS.map(c=>'ip_'+c)];
+      KEYS_LIMPIAR.forEach(k => { try { localStorage.removeItem(k); } catch(_){} });
+
+      // FIX-QUOTA: Limpiar fotos base64 de equipo (pueden ser 200-400KB cada una)
+      // Las fotos se guardan en LogoStore/IndexedDB, no en localStorage
+      const limpiarFotos = (arr) => arr.map(item => {
+        if(item && item.foto && item.foto.startsWith('data:')) {
+          return {...item, foto: ''};
+        }
+        return item;
+      });
+
+      // FIX-QUOTA: Limpiar soporteCierre grandes (archivos adjuntos base64 en tareas)
+      const limpiarSoporte = (arr) => arr.map(item => {
+        if(item && item.soporteCierre && typeof item.soporteCierre === 'string'
+           && item.soporteCierre.length > 10000) {
+          return {...item, soporteCierre: ''};
+        }
+        return item;
+      });
 
       let total = 0;
 
-      // ── PASO 1: Escribir TODO en localStorage de forma síncrona ──
-      // Esto es lo primero y más importante — garantiza datos disponibles siempre.
+      // PASO 1: Escribir en localStorage con datos limpios
+      const errores = [];
       COLS.forEach(c => {
-        if(Array.isArray(data[c])) {
-          localStorage.setItem('ip_'+c, JSON.stringify(data[c]));
-          total += data[c].length;
+        if(!Array.isArray(data[c])) return;
+        try {
+          let arr = data[c];
+          if(c === 'equipo')  arr = limpiarFotos(arr);
+          if(c === 'tareas')  arr = limpiarSoporte(arr);
+          localStorage.setItem('ip_'+c, JSON.stringify(arr));
+          total += arr.length;
+        } catch(qe) {
+          errores.push(c);
+          console.warn('FIX-QUOTA: No se pudo escribir ip_'+c+':', qe.message);
         }
       });
-      if(data.cfg)        localStorage.setItem('ip_config',     JSON.stringify(data.cfg));
-      if(data.apariencia) localStorage.setItem('ip_apariencia', JSON.stringify(data.apariencia));
-      if(data.usuarios)   localStorage.setItem('ip_usuarios',   JSON.stringify(data.usuarios));
+      try { if(data.cfg)        localStorage.setItem('ip_config',     JSON.stringify(data.cfg)); } catch(_){}
+      try { if(data.apariencia) localStorage.setItem('ip_apariencia', JSON.stringify(data.apariencia)); } catch(_){}
+      try { if(data.usuarios)   localStorage.setItem('ip_usuarios',   JSON.stringify(data.usuarios)); } catch(_){}
 
-      // ── Actualizar marca de backup ──
+      // Marca de backup
       const info = {ts: new Date().toISOString(), restoredFrom: file.name, total};
       setBackup(info);
-      localStorage.setItem('ip_backup', JSON.stringify(info));
+      try { localStorage.setItem('ip_backup', JSON.stringify(info)); } catch(_){}
 
-      // ── Forzar un autobackup del estado restaurado ──
-      window.AutoBackup?.run();
+      const msgExtra = errores.length > 0 ? ` (${errores.join(',')} con error)` : '';
+      toast(`Backup restaurado: ${total} registros${msgExtra}. Recargando...`, 'success');
 
-      toast(`✅ Backup restaurado: ${total} registros cargados. Recargando...`, 'success');
-
-      // ── PASO 2: Sincronizar en Firebase en segundo plano (no bloquea el reload) ──
+      // PASO 2: Sincronizar en Firebase en segundo plano
       const doFirebaseSync = async () => {
         if(!FIREBASE_OK || !window.IP_ONLINE) return;
         let synced = 0;
         for(const c of COLS) {
           if(!Array.isArray(data[c])) continue;
-          for(const doc of data[c]) {
+          let arr = data[c];
+          if(c === 'equipo') arr = limpiarFotos(arr);
+          if(c === 'tareas') arr = limpiarSoporte(arr);
+          for(const doc of arr) {
             if(!doc || !doc.id) continue;
             try {
               await _db.collection(c).doc(doc.id).set(doc, {merge:true});
               synced++;
             } catch(e) {
-              // Encolar para sincronización posterior si falla
               if(window.OfflineQueue) window.OfflineQueue.push(c, doc, 'set');
             }
           }
         }
-        console.log(`☁️ Backup restaurado en Firestore: ${synced} documentos`);
+        console.log('Backup restaurado en Firestore:', synced, 'documentos');
       };
-
-      // Iniciar sincronización Firebase sin await — no bloquea el flujo
       doFirebaseSync().catch(e => console.warn('Firebase sync parcial:', e.message));
 
-      // ── PASO 3: Recargar la app después de 2.5s para que React re-inicialice ──
+      // PASO 3: Recargar tras 2.5s
       setTimeout(() => window.location.reload(), 2500);
 
     } catch(e) {
       console.error('restaurarBackup error:', e);
-      toast('Error al restaurar: ' + (e.message || 'archivo inválido'), 'error');
+      toast('Error al restaurar: ' + (e.message || 'archivo invalido'), 'error');
     }
   };
 
@@ -14235,17 +14264,28 @@ const App = () => {
           console.log('🔒 onSnapshot: rol bloqueado explícitamente a', perfilNuevo.rol, 'para', perfilNuevo.email);
         }
         // Comparar permisos/rol actuales con los nuevos para detectar cambio real
-        const actualJSON = JSON.stringify({ permisos: user.permisos, rol: user.rol });
-        const nuevoJSON  = JSON.stringify({ permisos: perfilNuevo.permisos, rol: perfilNuevo.rol });
-        if(actualJSON !== nuevoJSON) {
-          // Permisos cambiaron — actualizar sesión y estado de React
+        // FIX-TOAST: Comparacion robusta + debounce 5s
+        const _sortKeys = (obj) => JSON.stringify(
+          Object.keys(obj||{}).sort().reduce((r,k)=>{r[k]=(obj||{})[k];return r;},{}));
+        const _rolCambio      = user.rol    !== perfilNuevo.rol;
+        const _cargoCambio    = user.cargo  !== perfilNuevo.cargo;
+        const _activoCambio   = user.activo !== perfilNuevo.activo;
+        const _permCambio     = _sortKeys(user.permisos) !== _sortKeys(perfilNuevo.permisos);
+        if(_rolCambio || _cargoCambio || _activoCambio || _permCambio) {
           localStorage.setItem('ip_session', JSON.stringify(perfilNuevo));
           setUser(perfilNuevo);
-          // Notificar al usuario que sus permisos fueron actualizados (sólo si NO fue auto-corrección)
-          const toastFn = window.__ipToast;
-          if(toastFn && user.rol === perfilNuevo.rol) {
-            toastFn('Tus permisos de acceso han sido actualizados por el administrador.', 'info');
+          if(window.PresenciaSvc) window.PresenciaSvc.actualizar(perfilNuevo);
+          const _ahora = Date.now();
+          if(_ahora - (window._lastPermToast||0) > 5000) {
+            window._lastPermToast = _ahora;
+            const toastFn = window.__ipToast;
+            if(toastFn) {
+              if(_rolCambio) toastFn(`Tu rol cambio a: ${perfilNuevo.rol}.`, 'info');
+              else if(_cargoCambio) toastFn(`Tu cargo cambio a: ${perfilNuevo.cargo||'sin cargo'}.`, 'info');
+              else if(_permCambio) toastFn('Tus permisos han sido actualizados.', 'info');
+            }
           }
+        }          }
         }
       }, () => {/* sin red: ignorar silenciosamente */});
     }
