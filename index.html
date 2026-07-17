@@ -1024,6 +1024,63 @@ const LogoStore = {
 // FIX-PERF: Retrasado de 500ms a 3s — no competir con React hydration
 setTimeout(() => LogoStore.migrateAll(), 3000);
 
+// ── FOTOSTORE — Almacenamiento aislado de fotos de equipo ──────────────────
+// Mismo patrón que LogoStore: la foto base64 vive en ip_foto_{memberId},
+// el campo 'foto' en ip_equipo solo lleva el flag '__local_foto__'.
+// Esto evita que las fotos (200KB cada una) saturen ip_equipo y se pierdan
+// durante la sincronización con Firestore o la restauración de backups.
+const FotoStore = {
+  KEY: id => 'ip_foto_' + id,
+  save: (id, base64) => {
+    if(!id || !base64) return false;
+    try { localStorage.setItem(FotoStore.KEY(id), base64); return true; }
+    catch(_) { return false; }
+  },
+  get: (id) => {
+    if(!id) return '';
+    try { return localStorage.getItem(FotoStore.KEY(id)) || ''; }
+    catch(_) { return ''; }
+  },
+  remove: (id) => {
+    if(!id) return;
+    try { localStorage.removeItem(FotoStore.KEY(id)); } catch(_){}
+  },
+  // Resuelve el campo foto de un miembro del equipo
+  resolve: (miembro) => {
+    if(!miembro) return '';
+    const raw = miembro.foto || '';
+    if(!raw) return '';
+    if(raw === '__local_foto__') return FotoStore.get(miembro.id);
+    if(raw.startsWith('data:image') && miembro.id) {
+      // Dato legacy embebido — migrar
+      FotoStore.save(miembro.id, raw);
+      return raw;
+    }
+    return raw;
+  },
+  // Migra fotos embebidas en ip_equipo al nuevo sistema
+  migrateAll: () => {
+    try {
+      const equipo = JSON.parse(localStorage.getItem('ip_equipo')||'[]');
+      let dirty = false;
+      const migrated = equipo.map(m => {
+        if(m.foto && m.foto.startsWith('data:image') && m.id) {
+          FotoStore.save(m.id, m.foto);
+          dirty = true;
+          return {...m, foto: '__local_foto__'};
+        }
+        return m;
+      });
+      if(dirty) {
+        localStorage.setItem('ip_equipo', JSON.stringify(migrated));
+      }
+    } catch(_){}
+  },
+};
+window.FotoStore = FotoStore;
+// Migrar fotos al arrancar (después de LogoStore)
+setTimeout(() => FotoStore.migrateAll(), 4000);
+
 const DB = {
   // Lee colección completa (fallback localStorage)
   get: col => JSON.parse(localStorage.getItem('ip_'+col)||'[]'),
@@ -1253,8 +1310,10 @@ const DB = {
             _startSnapshot();
           }
         }, 100);
-        // Timeout de seguridad: si después de 5s no está listo, iniciar igual
-        setTimeout(()=>{ clearInterval(_waitPersistence); _startSnapshot(); }, 5000);
+        // Timeout de seguridad: si después de 2s no está listo, iniciar igual
+        // FIX-PERF: Reducido de 5s a 2s — localStorage ya sirve datos inmediatamente,
+        // así que el onSnapshot puede esperar menos antes de arrancar como respaldo.
+        setTimeout(()=>{ clearInterval(_waitPersistence); _startSnapshot(); }, 2000);
       }
       return () => unsub();
     }
@@ -4571,7 +4630,7 @@ const EquipoMiembroCard = ({
     {/* Avatar */}
     <div style={{width:60,height:60,borderRadius:'50%',margin:'0 auto 10px',overflow:'hidden',
       background:'rgba(30,58,95,.3)',display:'flex',alignItems:'center',justifyContent:'center'}}>
-      {m.foto?<img src={m.foto} alt={m.nombre} style={{width:'100%',height:'100%',objectFit:'cover'}}/>
+      {(FotoStore.resolve(m))?<img src={FotoStore.resolve(m)} alt={m.nombre} style={{width:'100%',height:'100%',objectFit:'cover'}}/>
              :<Ico n="user" s={28} c="#C9A84C"/>}
     </div>
     <p className="sy" style={{fontWeight:700,color:'#fff',fontSize:13,margin:'0 0 2px'}}>{m.nombre}</p>
@@ -4701,15 +4760,23 @@ const Equipo = () => {
   const save = ()=>{
     if(!form.nombre?.trim()) return toast('Nombre requerido','error');
     const mbr={...form,id:form.id||uid(),_ts:Date.now()};
+    // FIX-FOTOS: Migrar foto a FotoStore para evitar saturar ip_equipo
+    if(mbr.foto && mbr.foto.startsWith('data:') && mbr.id) {
+      FotoStore.save(mbr.id, mbr.foto);
+      mbr.foto = '__local_foto__';
+    }
     // FIX INC-1: Envolver en try-catch para detectar cuota de localStorage excedida
     try {
       DB.set('equipo',mbr);
-      setEquipo(prev=>form.id?prev.map(x=>x.id===mbr.id?mbr:x):[mbr,...prev]);
+      // Resolver foto para la UI inmediata
+      const mbrUI = {...mbr, foto: FotoStore.resolve(mbr)};
+      setEquipo(prev=>form.id?prev.map(x=>x.id===mbrUI.id?mbrUI:x):[mbrUI,...prev]);
       setOpen(false); toast('Miembro guardado','success');
     } catch(storageErr) {
       if(storageErr.name==='QuotaExceededError'||storageErr.code===22) {
         // Reintentar sin la foto para preservar los demás datos
         const mbrSinFoto={...mbr,foto:''};
+        FotoStore.remove(mbr.id);
         try {
           DB.set('equipo',mbrSinFoto);
           setEquipo(prev=>form.id?prev.map(x=>x.id===mbrSinFoto.id?mbrSinFoto:x):[mbrSinFoto,...prev]);
@@ -4789,7 +4856,7 @@ const Equipo = () => {
       <div className="grid-2">
         <div style={{gridColumn:'1/-1',display:'flex',alignItems:'center',gap:14,marginBottom:4}}>
           <div style={{width:60,height:60,borderRadius:'50%',overflow:'hidden',background:'rgba(30,58,95,.3)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
-            {form.foto?<img src={form.foto} style={{width:'100%',height:'100%',objectFit:'cover'}}/>:<Ico n="user" s={26} c="#C9A84C"/>}
+            {(FotoStore.resolve(form))?<img src={FotoStore.resolve(form)} style={{width:'100%',height:'100%',objectFit:'cover'}}/>:<Ico n="user" s={26} c="#C9A84C"/>}
           </div>
           <label className="btn btn-ghost btn-sm" style={{cursor:'pointer'}}><Ico n="up" s={14}/>Cargar Foto<input type="file" accept="image/*" style={{display:'none'}} onChange={loadFoto}/></label>
         </div>
@@ -7826,6 +7893,11 @@ const ChatSvc = {
         // Sincronizar con localStorage como caché
         localStorage.setItem('ip_chat', JSON.stringify(msgs));
         cb(msgs);
+      }, err => {
+        // FIX-CHAT-ROOT: Manejar error de permisos RTDB
+        console.warn('ChatSvc.onMessages RTDB error:', err.message);
+        // Fallback a localStorage
+        cb(JSON.parse(localStorage.getItem('ip_chat')||'[]'));
       });
       ChatSvc._listeners.push({ref, handler, event:'value'});
       return () => ref.off('value', handler);
@@ -7985,17 +8057,17 @@ const Chat = () => {
   };
 
   // Suscripciones — V20-FIX: setOnline ahora devuelve función de cleanup
-  // que detiene el heartbeat y marca offline. Esto antes no se hacía y dejaba
-  // sesiones colgadas como online.
+  // FIX-CHAT-ROOT: Eliminado ChatSvc.setOnline duplicado — ya se hace desde App.
+  // La presencia se maneja globalmente para funcionar en todos los módulos.
+  // Solo suscribirse a mensajes, typing y presencia local del chat.
   useEffect(()=>{
-    if(!user?.id) return; // No registrar presencia hasta tener usuario
+    if(!user?.id) return;
     const unsubMsgs    = ChatSvc.onMessages(setMsgs);
     const unsubTyping  = ChatSvc.onTyping(user.id, setTyping);
     const unsubPresencia = ChatSvc.onPresencia(setPresencia);
-    const unsubOnline  = ChatSvc.setOnline(user.id, user.nombre);
+    // NO llamar ChatSvc.setOnline aquí — ya lo hace App globalmente
     return ()=>{
       unsubMsgs?.(); unsubTyping?.(); unsubPresencia?.();
-      if(typeof unsubOnline === 'function') unsubOnline();
       // V20-FIX: limpiar timer de typing al desmontar y notificar que dejé de escribir
       if(typingTimer.current) clearTimeout(typingTimer.current);
       ChatSvc.setTyping(user.id, user.nombre, false);
@@ -13040,10 +13112,17 @@ const Config = () => {
       KEYS_LIMPIAR.forEach(k => { try { localStorage.removeItem(k); } catch(_){} });
 
       // FIX-QUOTA: Limpiar fotos base64 de equipo (pueden ser 200-400KB cada una)
-      // Las fotos se guardan en LogoStore/IndexedDB, no en localStorage
+      // FIX-FOTOS-ROOT: En vez de BORRAR las fotos, migrarlas a FotoStore (claves
+      // individuales ip_foto_{id}) para que sobrevivan la limpieza de ip_equipo.
+      // Antes: limpiarFotos borraba las fotos y nunca se recuperaban.
       const limpiarFotos = (arr) => arr.map(item => {
         if(item && item.foto && typeof item.foto === 'string' && item.foto.startsWith('data:')) {
-          return {...item, foto: ''};
+          // Guardar foto en clave dedicada antes de limpiar
+          if(item.id) {
+            try { localStorage.setItem('ip_foto_' + item.id, item.foto); }
+            catch(_) { /* quota — se pierde esta foto */ }
+          }
+          return {...item, foto: '__local_foto__'};
         }
         return item;
       });
@@ -14370,33 +14449,47 @@ const App = () => {
     window.dispatchEvent(new CustomEvent('ip-user-ready', { detail: { uid: user.id } }));
 
     // FIX-PRESENCIA GLOBAL: desde App - funciona en todos los modulos
-    let _unsubOnlineGlobal = null;
-    let _unsubPresGlobal   = null;
-    if(RTDB_OK && user.id) {
-      _unsubOnlineGlobal = ChatSvc.setOnline(user.id, user.nombre, {
+    // FIX-PRESENCIA-ROOT: Movido a DENTRO del useEffect de data pero con
+    // protección contra re-creación innecesaria. El cleanup solo desconecta
+    // presencia cuando user.id cambia (login/logout), no en cambios de perfil.
+    // Se usa un ref para evitar recrear la suscripción si user.id no cambió.
+    if(RTDB_OK && user.id && !window._ipPresenciaActiva) {
+      window._ipPresenciaActiva = user.id;
+      window._unsubOnlineGlobal = ChatSvc.setOnline(user.id, user.nombre, {
         email: user.email||'', cargo: user.cargo||'',
         rol: user.rol||'', horaConexion: Date.now(),
       });
-      _unsubPresGlobal = ChatSvc.onPresencia((pres) => {
+      window._unsubPresGlobal = ChatSvc.onPresencia((pres) => {
         try { localStorage.setItem('ip_chat_presencia', JSON.stringify(pres)); } catch(_){}
         window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: pres }));
       });
+    } else if(!RTDB_OK) {
+      // Sin RTDB: emitir presencia local para que el indicador muestre al menos el usuario actual
+      const _presInit = { online:1, users:[{
+        id:user.id, nombre:user.nombre||'Usuario', email:user.email||'',
+        cargo:user.cargo||'', rol:user.rol||'', horaConexion:Date.now(), estado:'Activo'
+      }]};
+      try { localStorage.setItem('ip_chat_presencia', JSON.stringify(_presInit)); } catch(_){}
+      window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: _presInit }));
     }
-    const _presInit = { online:1, users:[{
-      id:user.id, nombre:user.nombre||'Usuario', email:user.email||'',
-      cargo:user.cargo||'', rol:user.rol||'', horaConexion:Date.now(), estado:'Activo'
-    }]};
-    try { localStorage.setItem('ip_chat_presencia', JSON.stringify(_presInit)); } catch(_){}
-    window.dispatchEvent(new CustomEvent('chat-presencia-updated', { detail: _presInit }));
 
     return () => {
       unsubs.forEach(fn=>fn()); unsubPerfil();
-      if(typeof _unsubOnlineGlobal==='function') _unsubOnlineGlobal();
-      if(typeof _unsubPresGlobal==='function')   _unsubPresGlobal();
+      // FIX-PRESENCIA-ROOT: Solo limpiar presencia en logout real (user→null),
+      // no en cambios de perfil (que re-disparan este useEffect via [user]).
+      // window._ipPresenciaActiva persiste la conexión RTDB entre re-renders.
     };
   },[user]);
 
-  const logout = async () => { localStorage.removeItem('ip_keep_session'); await AuthSvc.logout(); setUser(null); };
+  const logout = async () => {
+    // FIX-PRESENCIA-ROOT: Limpiar presencia RTDB al hacer logout
+    if(typeof window._unsubOnlineGlobal==='function') { window._unsubOnlineGlobal(); window._unsubOnlineGlobal=null; }
+    if(typeof window._unsubPresGlobal==='function')   { window._unsubPresGlobal();   window._unsubPresGlobal=null; }
+    window._ipPresenciaActiva = null;
+    localStorage.removeItem('ip_keep_session');
+    await AuthSvc.logout();
+    setUser(null);
+  };
 
   // B2: Mostrar spinner mientras Firebase verifica la sesión (evita flash de login)
   if(!authChecked) return (
