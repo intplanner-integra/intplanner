@@ -10164,9 +10164,33 @@ const Exportar = () => {
         if(y+needed > PH-18) { doc.addPage(); page++; drawFooter(); y = 22; }
       };
 
+      // FASE 2 BLINDAJE: Normalizar cualquier color a array RGB [r,g,b] antes de
+      // pasarlo a jsPDF. Si se cuela un string hexadecimal ('#FFFFFF' o '#FFF'),
+      // jsPDF emite un comando corrupto en el stream ('# F F F k') que rompe el
+      // PDF (páginas en blanco, layout desajustado al re-guardar). Esta conversión
+      // garantiza que NUNCA llegue un hex a jsPDF, sin importar el origen del color.
+      const _toRGB = (color) => {
+        if(Array.isArray(color)) return color;
+        if(typeof color === 'string') {
+          let hex = color.replace('#','').trim();
+          // Expandir forma corta #FFF → #FFFFFF
+          if(hex.length === 3) hex = hex.split('').map(ch => ch+ch).join('');
+          if(hex.length === 6) {
+            const r = parseInt(hex.slice(0,2),16);
+            const g = parseInt(hex.slice(2,4),16);
+            const b = parseInt(hex.slice(4,6),16);
+            if(!isNaN(r) && !isNaN(g) && !isNaN(b)) return [r,g,b];
+          }
+          // Hex inválido → negro seguro
+          return [0,0,0];
+        }
+        // Tipo desconocido → negro seguro
+        return [0,0,0];
+      };
       const setColor = (rgb, text=false) => {
-        if(text) doc.setTextColor(...rgb);
-        else doc.setFillColor(...rgb);
+        const c = _toRGB(rgb);
+        if(text) doc.setTextColor(c[0],c[1],c[2]);
+        else doc.setFillColor(c[0],c[1],c[2]);
       };
 
       const txt = (str,x,yy,opts={}) => {
@@ -10379,7 +10403,7 @@ const Exportar = () => {
       // Empresa + NIT
       setColor(C.goldR,true); doc.setFont('helvetica','bold'); doc.setFontSize(13);
       txt(empresa, M+29, 14);
-      if(cfg.nit){setColor(C.white,true); doc.setFont('helvetica','normal'); doc.setFontSize(8); txt('NIT: '+cfg.nit, M+29, 21);}
+      if(cfg.nit){setColor(C.whiteR,true); doc.setFont('helvetica','normal'); doc.setFontSize(8); txt('NIT: '+cfg.nit, M+29, 21);}
       // Título documento (derecha)
       setColor([255,255,255],true); doc.setFont(FF,'bold'); doc.setFontSize(FS(16));
       txt(cleanTxt(pCfg.tituloDocumento||'INFORME DE GESTION'), PW-M, 18, {align:'right'});
